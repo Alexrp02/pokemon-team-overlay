@@ -10,11 +10,11 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use notify::{Event, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path, sync::Arc};
+use std::{fs, io::stdin, path::Path, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
-const TEAM_FILE: &str = "team.txt";
+const DEFAULTS_TEAM_FILE: &str = "team.txt";
 const SPRITES_DIR: &str = "sprites";
 const STATIC_DIR: &str = "static";
 
@@ -31,6 +31,7 @@ struct PokemonTeam {
 
 struct AppState {
     tx: broadcast::Sender<PokemonTeam>,
+    team_file: String,
 }
 
 #[tokio::main]
@@ -39,20 +40,41 @@ async fn main() {
     fs::create_dir_all(SPRITES_DIR).expect("Failed to create sprites directory");
     fs::create_dir_all(STATIC_DIR).expect("Failed to create static directory");
 
+    println!("Enter the port number to run the server on (default 3000): ");
+    let mut port_input = String::new();
+    stdin().read_line(&mut port_input).unwrap_or(0);
+    let port_input = port_input.trim();
+    let port = if port_input.is_empty() {
+        3000
+    } else {
+        port_input.parse::<u16>().unwrap_or(3000)
+    };
+
+    println!("Enter team name (default 'team.txt'): ");
+    let mut team_file_name = String::new();
+    stdin().read_line(&mut team_file_name).unwrap_or(0);
+    let team_file_name = team_file_name.trim();
+    let team_file_name = if team_file_name.is_empty() {
+        DEFAULTS_TEAM_FILE.to_string()
+    } else {
+        team_file_name.to_string()
+    };
+
     // Create team file if it doesn't exist
-    if !Path::new(TEAM_FILE).exists() {
+    if !Path::new(DEFAULTS_TEAM_FILE).exists() {
         let default_team = "pikachu\ncharizard\nblastoise\nvenusaur\nmewtwo\ndragonite\n";
-        fs::write(TEAM_FILE, default_team).expect("Failed to create team file");
+        fs::write(DEFAULTS_TEAM_FILE, default_team).expect("Failed to create team file");
     }
 
     // Create broadcast channel for team updates
     let (tx, _) = broadcast::channel::<PokemonTeam>(100);
-    let state = Arc::new(AppState { tx: tx.clone() });
+    let state = Arc::new(AppState { tx: tx.clone(), team_file: team_file_name.clone() });
 
     // Setup file watcher with event-based monitoring
     let tx_watcher = tx.clone();
+    let team_file_name_clone = team_file_name.clone();
     tokio::spawn(async move {
-        if let Err(e) = watch_team_file(tx_watcher).await {
+        if let Err(e) = watch_team_file(&team_file_name_clone, tx_watcher).await {
             eprintln!("File watcher error: {}", e);
         }
     });
@@ -66,12 +88,12 @@ async fn main() {
         .with_state(state);
 
     // Start the server
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
-        .expect("Failed to bind to port 3000");
+        .expect(format!("Failed to bind to port {}", port).as_str());
 
-    println!("🚀 Server running on http://127.0.0.1:3000");
-    println!("📝 Edit '{}' to update your Pokemon team", TEAM_FILE);
+    println!("🚀 Server running on http://127.0.0.1:{}", port);
+    println!("📝 Edit '{}' to update your Pokemon team", team_file_name);
     println!(
         "🖼️  Place your Pokemon sprites in the '{}' directory",
         SPRITES_DIR
@@ -94,7 +116,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.tx.subscribe();
 
     // Send initial team state
-    if let Ok(team) = read_team_file() {
+    if let Ok(team) = read_team_file(state.team_file.as_str()) {
         let json = serde_json::to_string(&team).unwrap();
         if sender.send(Message::Text(json)).await.is_err() {
             return;
@@ -110,7 +132,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<()> {
+async fn watch_team_file(file_name: &str, tx: broadcast::Sender<PokemonTeam>) -> notify::Result<()> {
     use notify::{Config, EventKind};
 
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(100);
@@ -128,18 +150,18 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
     )?;
 
     // Watch the parent directory to catch rename/replace operations
-    let team_path = Path::new(TEAM_FILE);
+    let team_path = Path::new(file_name);
     let watch_path = team_path.parent().unwrap_or(Path::new("."));
 
     watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
 
     // Send initial state
-    if let Ok(team) = read_team_file() {
+    if let Ok(team) = read_team_file(file_name) {
         let _ = tx.send(team);
     }
 
     let mut last_content = String::new();
-    if let Ok(content) = fs::read_to_string(TEAM_FILE) {
+    if let Ok(content) = fs::read_to_string(file_name) {
         last_content = content;
     }
 
@@ -166,11 +188,11 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
                         // Check if content actually changed
-                        if let Ok(new_content) = fs::read_to_string(TEAM_FILE) {
+                        if let Ok(new_content) = fs::read_to_string(file_name) {
                             if new_content != last_content {
                                 last_content = new_content;
 
-                                if let Ok(team) = read_team_file() {
+                                if let Ok(team) = read_team_file(file_name) {
                                     let _ = tx.send(team);
                                 }
                             }
@@ -191,8 +213,8 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
     Ok(())
 }
 
-fn read_team_file() -> Result<PokemonTeam, std::io::Error> {
-    let content = fs::read_to_string(TEAM_FILE)?;
+fn read_team_file(file_name: &str) -> Result<PokemonTeam, std::io::Error> {
+    let content = fs::read_to_string(file_name)?;
     let pokemon: Vec<Pokemon> = content
         .lines()
         .map(|line| {

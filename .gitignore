@@ -1,0 +1,26 @@
+# Rust
+/target
+Cargo.lock
+
+# Sprites (user-provided)
+sprites/*.png
+sprites/*.gif
+sprites/*.jpg
+sprites/*.jpeg
+
+# Keep the sprites directory structure
+!sprites/.gitkeep
+
+# Team file (user-specific)
+team.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

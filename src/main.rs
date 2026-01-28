@@ -26,8 +26,14 @@ const SPRITES_DIR: &str = "sprites";
 const STATIC_DIR: &str = "static";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct Pokemon {
+    name: String,
+    nickname: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PokemonTeam {
-    pokemon: Vec<String>,
+    pokemon: Vec<Pokemon>,
 }
 
 struct AppState {
@@ -188,18 +194,32 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
 
 fn read_team_file() -> Result<PokemonTeam, std::io::Error> {
     let content = fs::read_to_string(TEAM_FILE)?;
-    let pokemon: Vec<String> = content
+    let pokemon: Vec<Pokemon> = content
         .lines()
-        .map(|line| line.trim().to_lowercase())
-        .filter(|line| !line.is_empty())
+        .map(
+            |line| {
+                let parts: Vec<&str> = line.trim().split(":").collect();
+                let name = parts[0].to_string();
+                let nickname = if parts.len() > 1 {
+                    Some(parts[1..].join(" "))
+                } else {
+                    None
+                };
+                Pokemon { name, nickname }
+}
+        )
+        .filter(|pokemon| !pokemon.name.is_empty())
         .take(6) // Only take first 6 Pokemon
         .collect();
     
     // Pad with empty strings if less than 6
-    let mut pokemon = pokemon;
-    while pokemon.len() < 6 {
-        pokemon.push(String::new());
+    let mut pokemon_team = pokemon;
+    while pokemon_team.len() < 6 {
+        pokemon_team.push(Pokemon {
+            name: String::new(),
+            nickname: None,
+        });
     }
     
-    Ok(PokemonTeam { pokemon })
+    Ok(PokemonTeam { pokemon: pokemon_team })
 }

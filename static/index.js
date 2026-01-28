@@ -1,5 +1,4 @@
 let ws;
-const statusEl = document.getElementById("status");
 const teamGridEl = document.getElementById("teamGrid");
 
 function connect() {
@@ -8,8 +7,6 @@ function connect() {
 
   ws.onopen = () => {
     console.log("Connected to server");
-    statusEl.textContent = "Connected";
-    statusEl.className = "status connected";
   };
 
   ws.onmessage = (event) => {
@@ -23,14 +20,10 @@ function connect() {
 
   ws.onerror = (error) => {
     console.error("WebSocket error:", error);
-    statusEl.textContent = "Connection Error";
-    statusEl.className = "status disconnected";
   };
 
   ws.onclose = () => {
     console.log("Disconnected from server");
-    statusEl.textContent = "Disconnected - Reconnecting...";
-    statusEl.className = "status disconnected";
 
     // Attempt to reconnect after 2 seconds
     setTimeout(connect, 2000);
@@ -41,7 +34,8 @@ function updateTeam(pokemon) {
   teamGridEl.innerHTML = "";
 
   for (let i = 0; i < 6; i++) {
-    const pokemonName = pokemon[i] || "";
+    const pokemonName = pokemon[i].name || "";
+    const pokemonNickname = pokemon[i].nickname || "";
     const isEmpty = !pokemonName;
 
     const card = document.createElement("div");
@@ -71,10 +65,11 @@ function updateTeam(pokemon) {
       spriteContainer.appendChild(img);
     }
 
-		// TODO: This name will be the nickname of the pokemon
     const nameEl = document.createElement("div");
     nameEl.className = `pokemon-name ${isEmpty ? "empty" : ""}`;
-    nameEl.textContent = isEmpty ? "Empty Slot" : pokemonName;
+    nameEl.textContent = isEmpty
+      ? "Empty Slot"
+      : pokemonNickname || pokemonName;
 
     card.appendChild(spriteContainer);
     card.appendChild(nameEl);

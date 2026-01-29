@@ -1,18 +1,30 @@
+mod utils;
+
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Path, State,
     },
+    http::{header, Response, StatusCode},
     response::IntoResponse,
     routing::get,
     Router,
 };
 use futures::{SinkExt, StreamExt};
 use notify::{Event, RecursiveMode, Watcher};
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path, sync::Arc};
+use std::{fs, path, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
+
+// --------------------
+// Pack static assets into the binary
+#[derive(RustEmbed)]
+#[folder = "static/"]
+struct Assets;
+// --------------------
 
 const TEAM_FILE: &str = "team.txt";
 const SPRITES_DIR: &str = "sprites";
@@ -40,7 +52,7 @@ async fn main() {
     fs::create_dir_all(STATIC_DIR).expect("Failed to create static directory");
 
     // Create team file if it doesn't exist
-    if !Path::new(TEAM_FILE).exists() {
+    if !path::Path::new(TEAM_FILE).exists() {
         let default_team = "pikachu\ncharizard\nblastoise\nvenusaur\nmewtwo\ndragonite\n";
         fs::write(TEAM_FILE, default_team).expect("Failed to create team file");
     }
@@ -61,7 +73,8 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(websocket_handler))
         .nest_service("/sprites", ServeDir::new(SPRITES_DIR))
-        .nest_service("/", ServeDir::new(STATIC_DIR))
+        .route("/", get(|| async { embedded_static(Path("".into())).await }))
+        .route("/*path", get(embedded_static))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -80,6 +93,27 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("Failed to start server");
+}
+
+async fn embedded_static(Path(path): Path<String>) -> Response<Body> {
+    let path = if path.is_empty() {
+        "index.html"
+    } else {
+        path.as_str()
+    };
+
+    match Assets::get(path) {
+        Some(file) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, utils::content_type(path))
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(file.data))
+            .unwrap(),
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("404"))
+            .unwrap(),
+    }
 }
 
 async fn websocket_handler(
@@ -128,8 +162,8 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
     )?;
 
     // Watch the parent directory to catch rename/replace operations
-    let team_path = Path::new(TEAM_FILE);
-    let watch_path = team_path.parent().unwrap_or(Path::new("."));
+    let team_path = path::Path::new(TEAM_FILE);
+    let watch_path = team_path.parent().unwrap_or(path::Path::new("."));
 
     watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
 

@@ -1,6 +1,9 @@
 let ws;
 const teamGridEl = document.getElementById("teamGrid");
 
+const params = new URLSearchParams(window.location.search);
+const teamName = params.get("team") || "team";
+
 function connect() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
@@ -12,7 +15,7 @@ function connect() {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      updateTeam(data.pokemon);
+      updateTeam(data[teamName]?.pokemon ?? []);
     } catch (error) {
       console.error("Error parsing message:", error);
     }

@@ -15,7 +15,12 @@ use futures::{SinkExt, StreamExt};
 use notify::{Event, RecursiveMode, Watcher};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use std::{fs, path, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs::{self, DirEntry},
+    path,
+    sync::Arc,
+};
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
@@ -42,7 +47,7 @@ struct PokemonTeam {
 }
 
 struct AppState {
-    tx: broadcast::Sender<PokemonTeam>,
+    tx: broadcast::Sender<HashMap<String, PokemonTeam>>,
 }
 
 #[tokio::main]
@@ -58,13 +63,13 @@ async fn main() {
     }
 
     // Create broadcast channel for team updates
-    let (tx, _) = broadcast::channel::<PokemonTeam>(100);
+    let (tx, _) = broadcast::channel::<HashMap<String, PokemonTeam>>(100);
     let state = Arc::new(AppState { tx: tx.clone() });
 
     // Setup file watcher with event-based monitoring
     let tx_watcher = tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = watch_team_file(tx_watcher).await {
+        if let Err(e) = watch_team_files(tx_watcher).await {
             eprintln!("File watcher error: {}", e);
         }
     });
@@ -73,7 +78,10 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(websocket_handler))
         .nest_service("/sprites", ServeDir::new(SPRITES_DIR))
-        .route("/", get(|| async { embedded_static(Path("".into())).await }))
+        .route(
+            "/",
+            get(|| async { embedded_static(Path("".into())).await }),
+        )
         .route("/*path", get(embedded_static))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -85,6 +93,8 @@ async fn main() {
 
     println!("🚀 Server running on http://127.0.0.1:3000");
     println!("📝 Edit '{}' to update your Pokemon team", TEAM_FILE);
+    println!("  - You can also create additional team files containing 'team' in their name.");
+    println!("  - Putting 'team' search param in the URL will switch teams.");
     println!(
         "🖼️  Place your Pokemon sprites in the '{}' directory",
         SPRITES_DIR
@@ -128,7 +138,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.tx.subscribe();
 
     // Send initial team state
-    if let Ok(team) = read_team_file() {
+    if let Ok(team) = read_team_files() {
         let json = serde_json::to_string(&team).unwrap();
         if sender.send(Message::Text(json)).await.is_err() {
             return;
@@ -144,7 +154,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<()> {
+async fn watch_team_files(
+    tx: broadcast::Sender<HashMap<String, PokemonTeam>>,
+) -> notify::Result<()> {
     use notify::{Config, EventKind};
 
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(100);
@@ -161,20 +173,14 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
         config,
     )?;
 
-    // Watch the parent directory to catch rename/replace operations
-    let team_path = path::Path::new(TEAM_FILE);
-    let watch_path = team_path.parent().unwrap_or(path::Path::new("."));
-
-    watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
-
-    // Send initial state
-    if let Ok(team) = read_team_file() {
-        let _ = tx.send(team);
+    for file in get_team_files() {
+        let file_path = path::Path::new(&file);
+        watcher.watch(file_path, RecursiveMode::NonRecursive)?;
     }
 
-    let mut last_content = String::new();
-    if let Ok(content) = fs::read_to_string(TEAM_FILE) {
-        last_content = content;
+    // Send initial state
+    if let Ok(team) = read_team_files() {
+        let _ = tx.send(team);
     }
 
     // Watch for file changes
@@ -182,32 +188,36 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
         match notify_rx.recv().await {
             Some(event) => {
                 // Check if the event is related to our file
-                let is_team_file = event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == team_path.file_name());
+                let is_team_file = event.paths.iter().any(|p| {
+                    p.file_name()
+                        .map_or(false, |name| name.to_string_lossy().contains("team"))
+                });
 
                 if !is_team_file {
+                    println!("Ignoring event for non-team file: {:?}", event.paths);
                     continue;
                 }
 
                 match event.kind {
+                    EventKind::Remove(_) => {
+                        // Keep watching the file if it is recreated
+                        for path in event.paths {
+                            if let Some(file_name) = path.file_name() {
+                                if file_name.to_string_lossy().contains("team") {
+                                    let _ = watcher.watch(&path, RecursiveMode::NonRecursive);
+                                }
+                            }
+                        }
+                    }
                     EventKind::Modify(_)
                     | EventKind::Create(_)
-                    | EventKind::Remove(_)
                     | EventKind::Any => {
                         // Small delay to ensure file write is complete
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
                         // Check if content actually changed
-                        if let Ok(new_content) = fs::read_to_string(TEAM_FILE) {
-                            if new_content != last_content {
-                                last_content = new_content;
-
-                                if let Ok(team) = read_team_file() {
-                                    let _ = tx.send(team);
-                                }
-                            }
+                        if let Ok(team) = read_team_files() {
+                            let _ = tx.send(team);
                         }
                     }
                     _ => {}
@@ -225,34 +235,66 @@ async fn watch_team_file(tx: broadcast::Sender<PokemonTeam>) -> notify::Result<(
     Ok(())
 }
 
-fn read_team_file() -> Result<PokemonTeam, std::io::Error> {
-    let content = fs::read_to_string(TEAM_FILE)?;
-    let pokemon: Vec<Pokemon> = content
-        .lines()
-        .map(|line| {
-            let parts: Vec<&str> = line.trim().split(":").collect();
-            let name = parts[0].to_string();
-            let nickname = if parts.len() > 1 {
-                Some(parts[1..].join(" "))
-            } else {
-                None
-            };
-            Pokemon { name, nickname }
+fn get_team_files() -> Vec<String> {
+    fs::read_dir(path::Path::new("."))
+        .expect("Failed to read current directory")
+        .collect::<Vec<Result<DirEntry, std::io::Error>>>()
+        .into_iter()
+        .map(|res| res.unwrap())
+        .collect::<Vec<DirEntry>>()
+        .into_iter()
+        .filter(|entry| {
+            entry.path().is_file()
+                && entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Invalid filename"))
+                    .unwrap()
+                    .contains("team")
         })
-        .filter(|pokemon| !pokemon.name.is_empty())
-        .take(6) // Only take first 6 Pokemon
-        .collect();
+        .map(|res| res.file_name().into_string().unwrap())
+        .collect()
+}
 
-    // Pad with empty strings if less than 6
-    let mut pokemon_team = pokemon;
-    while pokemon_team.len() < 6 {
-        pokemon_team.push(Pokemon {
-            name: String::new(),
-            nickname: None,
-        });
+fn read_team_files() -> Result<HashMap<String, PokemonTeam>, std::io::Error> {
+    let files = get_team_files();
+
+    let mut teams = HashMap::new();
+
+    for file in files {
+        let content = fs::read_to_string(&file)?;
+        let pokemon: Vec<Pokemon> = content
+            .lines()
+            .map(|line| {
+                let parts: Vec<&str> = line.trim().split(":").collect();
+                let name = parts[0].to_string();
+                let nickname = if parts.len() > 1 {
+                    Some(parts[1..].join(" "))
+                } else {
+                    None
+                };
+                Pokemon { name, nickname }
+            })
+            .filter(|pokemon| !pokemon.name.is_empty())
+            .take(6) // Only take first 6 Pokemon
+            .collect();
+
+        // Pad with empty strings if less than 6
+        let mut pokemon_team = pokemon;
+        while pokemon_team.len() < 6 {
+            pokemon_team.push(Pokemon {
+                name: String::new(),
+                nickname: None,
+            });
+        }
+
+        teams.insert(
+            file.split('.').next().unwrap().to_string(),
+            PokemonTeam {
+                pokemon: pokemon_team,
+            },
+        );
     }
 
-    Ok(PokemonTeam {
-        pokemon: pokemon_team,
-    })
+    Ok(teams)
 }

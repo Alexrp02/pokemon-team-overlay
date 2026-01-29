@@ -209,9 +209,7 @@ async fn watch_team_files(
                             }
                         }
                     }
-                    EventKind::Modify(_)
-                    | EventKind::Create(_)
-                    | EventKind::Any => {
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any => {
                         // Small delay to ensure file write is complete
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
@@ -244,13 +242,14 @@ fn get_team_files() -> Vec<String> {
         .collect::<Vec<DirEntry>>()
         .into_iter()
         .filter(|entry| {
+            let entry_string = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Invalid filename"))
+                .unwrap();
             entry.path().is_file()
-                && entry
-                    .file_name()
-                    .into_string()
-                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Invalid filename"))
-                    .unwrap()
-                    .contains("team")
+                && entry_string.contains("team")
+                && entry_string.ends_with(".txt")
         })
         .map(|res| res.file_name().into_string().unwrap())
         .collect()
@@ -258,6 +257,8 @@ fn get_team_files() -> Vec<String> {
 
 fn read_team_files() -> Result<HashMap<String, PokemonTeam>, std::io::Error> {
     let files = get_team_files();
+
+    println!("Reading team files: {:?}", files);
 
     let mut teams = HashMap::new();
 

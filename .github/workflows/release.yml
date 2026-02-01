@@ -70,6 +70,23 @@ jobs:
           cp target/x86_64-pc-windows-gnu/release/$BIN_NAME.exe \
              dist/${BIN_NAME}-windows-x86_64.exe
 
+      - name: Install git-cliff
+        run: cargo install git-cliff
+
+      - name: Generate release notes
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B -- Cargo.toml)
+          COMMIT_CHANGELOG=$(git cliff --latest --strip header)
+          {
+            echo "## 📝 Release Summary"
+            echo
+            echo "$COMMIT_MSG"
+            echo
+            echo "-----"
+            echo
+            echo "$COMMIT_CHANGELOG"
+          } > RELEASE_NOTES.md
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,4 +96,4 @@ jobs:
           gh release create v$VERSION \
             dist/* \
             --title "v$VERSION" \
-            --notes "Release v$VERSION"
+            --notes-file RELEASE_NOTES.md

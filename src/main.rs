@@ -181,46 +181,69 @@ async fn watch_team_files(
         let _ = tx.send(team);
     }
 
+    // Debounce timer: only send update after 300ms of silence
+    let mut debounce_timer: Option<tokio::time::Instant> = None;
+    let debounce_duration = std::time::Duration::from_millis(300);
+
     // Watch for file changes
     loop {
-        match notify_rx.recv().await {
-            Some(event) => {
-                // Only react to team *.txt files
-                let is_team_file = event.paths.iter().any(|p| {
-                    p.file_name().map_or(false, |name| {
-                        let name = name.to_string_lossy();
-                        name.contains("team")
-                            && name.ends_with(".txt")
-                            && !name.ends_with('~')
-                            && !name.ends_with(".swp")
-                            && !name.ends_with(".tmp")
-                    })
-                });
-
-                if !is_team_file {
-                    continue;
+        let timeout = if let Some(deadline) = debounce_timer {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                // Timer expired, send update
+                debounce_timer = None;
+                if let Ok(team) = read_team_files() {
+                    let _ = tx.send(team);
                 }
+                continue;
+            }
+            deadline - now
+        } else {
+            // No timer set, wait indefinitely
+            std::time::Duration::from_secs(3600)
+        };
 
-                match event.kind {
-                    EventKind::Modify(_)
-                    | EventKind::Create(_)
-                    | EventKind::Remove(_)
-                    | EventKind::Any => {
-                        println!("File event: {:?}", event);
-                        println!("----------");
-                        // Small delay to ensure file write/rename is complete
-                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        tokio::select! {
+            event_result = notify_rx.recv() => {
+                match event_result {
+                    Some(event) => {
+                        // Only react to team *.txt files
+                        let is_team_file = event.paths.iter().any(|p| {
+                            p.file_name().map_or(false, |name| {
+                                let name = name.to_string_lossy();
+                                name.contains("team")
+                                    && name.ends_with(".txt")
+                                    && !name.ends_with('~')
+                                    && !name.ends_with(".swp")
+                                    && !name.ends_with(".tmp")
+                            })
+                        });
 
-                        if let Ok(team) = read_team_files() {
-                            let _ = tx.send(team);
+                        if !is_team_file {
+                            continue;
+                        }
+
+                        match event.kind {
+                            EventKind::Modify(_)
+                            | EventKind::Create(_)
+                            | EventKind::Remove(_)
+                            | EventKind::Any => {
+                                // Reset debounce timer
+                                debounce_timer = Some(tokio::time::Instant::now() + debounce_duration);
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
+                    None => {
+                        eprintln!("File watcher channel closed");
+                        break;
+                    }
                 }
             }
-            None => {
-                eprintln!("File watcher channel closed");
-                break;
+            // Note to myself: tokio::time::sleep returns a future that completes after the duration
+            _ = tokio::time::sleep(timeout) => {
+                // Timer expired, will be handled in next iteration
+                continue;
             }
         }
     }
@@ -254,8 +277,6 @@ fn get_team_files() -> Vec<String> {
 
 fn read_team_files() -> Result<HashMap<String, PokemonTeam>, std::io::Error> {
     let files = get_team_files();
-
-    println!("Reading team files: {:?}", files);
 
     let mut teams = HashMap::new();
 

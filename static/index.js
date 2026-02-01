@@ -3,6 +3,7 @@ const teamGridEl = document.getElementById("teamGrid");
 
 const params = new URLSearchParams(window.location.search);
 const teamName = params.get("team") || "team";
+let currentTeam = [];
 
 function connect() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -33,12 +34,17 @@ function connect() {
   };
 }
 
-function updateTeam(pokemon) {
-  teamGridEl.innerHTML = "";
-
+function updateTeam(newTeam) {
   for (let i = 0; i < 6; i++) {
-    const pokemonName = pokemon[i].name || "";
-    const pokemonNickname = pokemon[i].nickname || "";
+    const existingCard = teamGridEl.children[i];
+    if (
+      currentTeam[i]?.name === newTeam[i]?.name &&
+      currentTeam[i]?.nickname === newTeam[i]?.nickname
+    ) {
+      continue;
+    }
+    const pokemonName = newTeam[i].name || "";
+    const pokemonNickname = newTeam[i].nickname || "";
     const isEmpty = !pokemonName;
 
     const card = document.createElement("div");
@@ -76,8 +82,13 @@ function updateTeam(pokemon) {
 
     card.appendChild(spriteContainer);
     card.appendChild(nameEl);
-    teamGridEl.appendChild(card);
+    if (existingCard) {
+      teamGridEl.replaceChild(card, existingCard);
+    } else {
+      teamGridEl.appendChild(card);
+    }
   }
+  currentTeam = [...newTeam];
 }
 
 // Initialize connection

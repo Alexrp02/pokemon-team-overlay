@@ -33,13 +33,11 @@ h1 {
 	grid-template-rows: 1fr 1fr;
 	height: 100%; /* or 100% if parent has a fixed height */
 	gap: 30px;
-	padding: 20px;
 	align-content: space-between;
 }
 
 .pokemon-card {
 	border-radius: 16px;
-	padding: 20px;
 	transition:
 		transform 0.3s ease,
 		box-shadow 0.3s ease;
@@ -48,6 +46,7 @@ h1 {
 	align-items: center;
 	justify-content: center;
 	min-height: 280px;
+	min-width: 0;
 }
 
 .pokemon-card.empty {
@@ -61,7 +60,6 @@ h1 {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	margin-bottom: 15px;
 	position: relative;
 	overflow: hidden;
 }
@@ -83,11 +81,16 @@ h1 {
 }
 
 .pokemon-name {
-	font-size: 1.5em;
-	font-weight: bold;
-	color: #333;
-	text-transform: capitalize;
+	width: 100%;
+	min-width: 0;
+	margin: 0 auto;
+
+	font-size: 5em;
+	font-weight: bolder;
+	color: black;
 	text-align: center;
+
+	word-wrap: break-word;
 }
 
 .pokemon-name.empty {

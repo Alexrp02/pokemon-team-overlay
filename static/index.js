@@ -72,7 +72,7 @@ function updateTeam(pokemon) {
     nameEl.className = `pokemon-name ${isEmpty ? "empty" : ""}`;
     nameEl.textContent = isEmpty
       ? "Empty Slot"
-      : pokemonNickname || pokemonName;
+      : pokemonNickname || pokemonName[0].toUpperCase() + pokemonName.slice(1);
 
     card.appendChild(spriteContainer);
     card.appendChild(nameEl);

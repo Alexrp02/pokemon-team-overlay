@@ -173,10 +173,8 @@ async fn watch_team_files(
         config,
     )?;
 
-    for file in get_team_files() {
-        let file_path = path::Path::new(&file);
-        watcher.watch(file_path, RecursiveMode::NonRecursive)?;
-    }
+    // Watch the current directory for changes
+    watcher.watch(path::Path::new("."), RecursiveMode::NonRecursive)?;
 
     // Send initial state
     if let Ok(team) = read_team_files() {
@@ -187,33 +185,32 @@ async fn watch_team_files(
     loop {
         match notify_rx.recv().await {
             Some(event) => {
-                // Check if the event is related to our file
+                // Only react to team *.txt files
                 let is_team_file = event.paths.iter().any(|p| {
-                    p.file_name()
-                        .map_or(false, |name| name.to_string_lossy().contains("team"))
+                    p.file_name().map_or(false, |name| {
+                        let name = name.to_string_lossy();
+                        name.contains("team")
+                            && name.ends_with(".txt")
+                            && !name.ends_with('~')
+                            && !name.ends_with(".swp")
+                            && !name.ends_with(".tmp")
+                    })
                 });
 
                 if !is_team_file {
-                    println!("Ignoring event for non-team file: {:?}", event.paths);
                     continue;
                 }
 
                 match event.kind {
-                    EventKind::Remove(_) => {
-                        // Keep watching the file if it is recreated
-                        for path in event.paths {
-                            if let Some(file_name) = path.file_name() {
-                                if file_name.to_string_lossy().contains("team") {
-                                    let _ = watcher.watch(&path, RecursiveMode::NonRecursive);
-                                }
-                            }
-                        }
-                    }
-                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any => {
-                        // Small delay to ensure file write is complete
+                    EventKind::Modify(_)
+                    | EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Any => {
+                        println!("File event: {:?}", event);
+                        println!("----------");
+                        // Small delay to ensure file write/rename is complete
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
-                        // Check if content actually changed
                         if let Ok(team) = read_team_files() {
                             let _ = tx.send(team);
                         }

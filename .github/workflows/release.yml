@@ -73,9 +73,17 @@ jobs:
       - name: Install git-cliff
         run: cargo install git-cliff
 
+      - name: Create release tag
+        run: |
+          git tag v${{ steps.version.outputs.version }}
+
+      - name: Push release tag
+        run: |
+          git push origin v${{ steps.version.outputs.version }}
+
       - name: Generate release notes
         run: |
-          COMMIT_MSG=$(git log -1 --pretty=%B -- Cargo.toml)
+          COMMIT_MSG=$(git log -1 --pretty=%b -- Cargo.toml)
           COMMIT_CHANGELOG=$(git cliff --latest --strip header)
           {
             echo "## 📝 Release Summary"

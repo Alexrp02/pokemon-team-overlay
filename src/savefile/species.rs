@@ -40,10 +40,10 @@ static SPECIES: &[Option<&str>] = &[
     Some("raichu"),     // 26
     Some("sandshrew"),  // 27
     Some("sandslash"),  // 28
-    Some("nidoranf"),  // 29
+    Some("nidoranf"),   // 29
     Some("nidorina"),   // 30
     Some("nidoqueen"),  // 31
-    Some("nidoranm"),  // 32
+    Some("nidoranm"),   // 32
     Some("nidorino"),   // 33
     Some("nidoking"),   // 34
     Some("clefairy"),   // 35
@@ -133,7 +133,7 @@ static SPECIES: &[Option<&str>] = &[
     Some("seaking"),    // 119
     Some("staryu"),     // 120
     Some("starmie"),    // 121
-    Some("mrmime"),    // 122
+    Some("mrmime"),     // 122
     Some("scyther"),    // 123
     Some("jynx"),       // 124
     Some("electabuzz"), // 125
@@ -261,7 +261,7 @@ static SPECIES: &[Option<&str>] = &[
     Some("pupitar"),    // 247
     Some("tyranitar"),  // 248
     Some("lugia"),      // 249
-    Some("hooh"),      // 250
+    Some("hooh"),       // 250
     Some("celebi"),     // 251
     Some("treecko"),    // 252
     Some("grovyle"),    // 253
@@ -450,7 +450,7 @@ static SPECIES: &[Option<&str>] = &[
     Some("bronzor"),    // 436
     Some("bronzong"),   // 437
     Some("bonsly"),     // 438
-    Some("mimejr"),    // 439
+    Some("mimejr"),     // 439
     Some("happiny"),    // 440
     Some("chatot"),     // 441
     Some("spiritomb"),  // 442
@@ -485,7 +485,7 @@ static SPECIES: &[Option<&str>] = &[
     Some("glaceon"),    // 471
     Some("gliscor"),    // 472
     Some("mamoswine"),  // 473
-    Some("porygonz"),  // 474
+    Some("porygonz"),   // 474
     Some("gallade"),    // 475
     Some("probopass"),  // 476
     Some("dusknoir"),   // 477

@@ -4,23 +4,38 @@ mod species;
 
 use crate::team::Pokemon;
 
-// ── HGSS save file layout (Bulbapedia: Save data structure – Generation IV) ──
+// ── HGSS save file layout ─────────────────────────────────────────────────────
 //
-//   Small block 1:  0x00000 – 0x0F6FF  (footer at 0x0F6FC: checksum + save counter)
-//   Big   block 1:  0x0F700 – 0x21A10
-//   Small block 2:  0x40000 – 0x4F6FF  (backup copy of small block 1)
-//   Big   block 2:  0x4F700 – 0x61A10  (backup copy of big block 1)
+//   Small block 1:  starts at 0x00000  (size 0xF628, footer at 0xF614)
+//   Big   block 1:  starts at 0x0F700
+//   Small block 2:  starts at 0x40000  (backup)
+//   Big   block 2:  starts at 0x4F700  (backup)
 //
-// The active save is whichever pair has the higher save counter.  The counter is
-// a u16 at offset 0x0F6FE within each pair's small block (PKHeX convention).
+// Footer layout (last 0x14 bytes of each block, verified against raw save data):
+//   +0x00–0x03  Block connection ID
+//   +0x04–0x07  Save number (u32 LE)  ← higher value = most recently written
+//   +0x08–0x0B  Block size (u32 LE)
+//   +0x0C–0x0F  K
+//   +0x10–0x11  T
+//   +0x12–0x13  CRC-16-CCITT checksum
+//
+// Source: projectpokemon.org/home/docs/gen-4/hgss-save-structure-r76/
+//         + raw save file inspection.
 
-/// Size of one small block, including its footer.
-const SMALL_BLOCK_SIZE: usize = 0xF700;
+/// Size of one HGSS small block in bytes (confirmed from the block-size footer field).
+const SMALL_BLOCK_SIZE: usize = 0xF628;
+
+/// Offset of the footer within a small block (SMALL_BLOCK_SIZE - 0x14).
+const FOOTER_OFFSET: usize = SMALL_BLOCK_SIZE - 0x14;
+
+/// Offset of the save number (u32 LE) within a small block (footer + 0x04).
+const SAVE_NUMBER_OFFSET: usize = FOOTER_OFFSET + 0x04;
 
 /// Byte offset of the second small block (backup pair) within the file.
 const SMALL_BLOCK_2_START: usize = 0x40000;
 
 // ── Offsets within the active small block ────────────────────────────────────
+// Source: projectpokemon.org/home/docs/gen-4/hgss-save-structure-r76/
 
 /// Number of Pokemon currently in the party (u8).
 const PARTY_COUNT_OFFSET: usize = 0x94;
@@ -59,12 +74,12 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
     ])
 }
 
-/// Read the save counter from a save-file byte slice that starts at a small-block boundary.
+/// Read the save number (u32 LE) from a slice starting at a small-block boundary.
 ///
 /// Returns `0` if the slice is too short.
-fn save_counter(save: &[u8]) -> u16 {
-    if save.len() >= SMALL_BLOCK_SIZE {
-        read_u16_le(save, 0x0F6FE)
+fn save_number(block: &[u8]) -> u32 {
+    if block.len() > SAVE_NUMBER_OFFSET + 3 {
+        read_u32_le(block, SAVE_NUMBER_OFFSET)
     } else {
         0
     }
@@ -72,13 +87,14 @@ fn save_counter(save: &[u8]) -> u16 {
 
 /// Determine the byte offset of the active small block within the full save file.
 ///
-/// If both save pairs are present the one with the higher (wrapping) save counter wins.
+/// The block with the higher save number is the most recently written one.
+/// Wrapping arithmetic handles counter roll-over.
 fn active_small_block_start(data: &[u8]) -> usize {
     if data.len() >= SMALL_BLOCK_2_START + SMALL_BLOCK_SIZE {
-        let count1 = save_counter(data);
-        let count2 = save_counter(&data[SMALL_BLOCK_2_START..]);
-        // Wrapping comparison handles counter roll-over.
-        if count2.wrapping_sub(count1) < 0x8000 && count2 != count1 {
+        let num1 = save_number(data);
+        let num2 = save_number(&data[SMALL_BLOCK_2_START..]);
+        // Wrapping subtraction: if result < 2^31, num2 is ahead of num1.
+        if num2.wrapping_sub(num1) < 0x8000_0000 && num2 != num1 {
             return SMALL_BLOCK_2_START;
         }
     }

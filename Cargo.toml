@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "io-std"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 notify = "6.1"
@@ -14,5 +14,9 @@ serde_json = "1.0"
 futures = "0.3"
 tokio-stream = "0.1"
 rust-embed = "8.11.0"
-iroh = "0.96.1"
+iroh = { version = "0.96.1", default-features = false }
 iroh-tickets = "0.3.0"
+
+[profile.release]
+lto = true
+codegen-units = 1

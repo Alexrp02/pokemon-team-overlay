@@ -53,37 +53,27 @@ pub async fn run(state: Arc<AppState>) -> Result<(), P2pError> {
     let accept_active = Arc::clone(&active);
     let accept_endpoint = endpoint.clone();
     let accept_next_id = Arc::clone(&next_id);
-    tokio::spawn(async move {
-        accept_loop(accept_endpoint, accept_state, accept_active, accept_next_id).await;
-    });
+    tokio::spawn(accept_loop(
+        accept_endpoint,
+        accept_state,
+        accept_active,
+        accept_next_id,
+    ));
 
-    let mut ticket_rx = spawn_ticket_reader();
     let connect_state = Arc::clone(&state);
     let connect_active = Arc::clone(&active);
     let connect_endpoint = endpoint.clone();
     let connect_next_id = Arc::clone(&next_id);
-    tokio::spawn(async move {
-        while let Some(ticket) = ticket_rx.recv().await {
-            if let Err(err) =
-                connect_with_ticket(
-                    &connect_endpoint,
-                    &ticket,
-                    connect_state.clone(),
-                    connect_active.clone(),
-                    connect_next_id.clone(),
-                )
-                    .await
-            {
-                eprintln!("P2P connect error: {}", err);
-            }
-        }
-    });
+    tokio::spawn(connect_ticket_loop(
+        connect_endpoint,
+        connect_state,
+        connect_active,
+        connect_next_id,
+    ));
 
     let update_state = Arc::clone(&state);
     let update_active = Arc::clone(&active);
-    tokio::spawn(async move {
-        send_updates_loop(update_state, update_active).await;
-    });
+    tokio::spawn(send_updates_loop(update_state, update_active));
 
     std::future::pending::<()>().await;
     Ok(())
@@ -115,6 +105,23 @@ async fn accept_loop(
     }
 }
 
+async fn connect_ticket_loop(
+    endpoint: Endpoint,
+    state: Arc<AppState>,
+    active: Arc<Mutex<Option<ActiveConnection>>>,
+    next_id: Arc<AtomicU64>,
+) {
+    let mut ticket_rx = spawn_ticket_reader();
+    while let Some(ticket) = ticket_rx.recv().await {
+        if let Err(err) =
+            connect_with_ticket(&endpoint, &ticket, state.clone(), active.clone(), next_id.clone())
+                .await
+        {
+            eprintln!("P2P connect error: {}", err);
+        }
+    }
+}
+
 async fn connect_with_ticket(
     endpoint: &Endpoint,
     ticket: &str,
@@ -134,15 +141,7 @@ async fn handle_connection(
     next_id: Arc<AtomicU64>,
 ) -> Result<(), P2pError> {
     let connection_id = next_id.fetch_add(1, Ordering::Relaxed);
-    let replaced = {
-        let mut guard = active.lock().await;
-        let existing = guard.take();
-        *guard = Some(ActiveConnection {
-            id: connection_id,
-            conn: conn.clone(),
-        });
-        existing
-    };
+    let replaced = replace_active_connection(&active, connection_id, &conn).await;
 
     if let Some(existing) = replaced {
         existing.conn.close(0u8.into(), b"replaced by new connection");
@@ -158,17 +157,18 @@ async fn handle_connection(
 
     let recv_state = state.clone();
     let recv_active = active.clone();
-    let closed_state = state.clone();
-    let closed_active = active.clone();
-    let closed_conn = conn.clone();
+    let recv_conn = conn.clone();
     let recv_id = connection_id;
     tokio::spawn(async move {
-        if let Err(err) = receive_loop(conn, recv_state.clone()).await {
+        if let Err(err) = receive_loop(recv_conn, recv_state.clone()).await {
             eprintln!("P2P receive error: {}", err);
         }
         reset_connection(recv_state, recv_active, "receive loop ended", recv_id).await;
     });
 
+    let closed_state = state.clone();
+    let closed_active = active.clone();
+    let closed_conn = conn;
     let closed_id = connection_id;
     tokio::spawn(async move {
         closed_conn.closed().await;
@@ -206,11 +206,7 @@ async fn send_updates_loop(state: Arc<AppState>, active: Arc<Mutex<Option<Active
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         };
 
-        let current = {
-            let guard = active.lock().await;
-            guard.as_ref().map(|active| (active.id, active.conn.clone()))
-        };
-        if let Some((conn_id, conn)) = current {
+        if let Some((conn_id, conn)) = active_connection_snapshot(&active).await {
             if let Err(err) = send_teams(&conn, &teams).await {
                 eprintln!("P2P send error: {}", err);
                 reset_connection(state.clone(), active.clone(), "send failed", conn_id).await;
@@ -237,13 +233,18 @@ async fn update_remote(state: Arc<AppState>, teams: HashMap<String, PokemonTeam>
         let previous: std::collections::HashSet<String> = remote.keys().cloned().collect();
         let next: std::collections::HashSet<String> = teams.keys().cloned().collect();
         should_log = previous != next;
-        *remote = teams.clone();
+        *remote = teams;
     }
-    let _ = state.tx_remote.send(teams.clone());
+    let teams_snapshot = {
+        let remote = state.remote.read().await;
+        remote.clone()
+    };
+    let _ = state.tx_remote.send(teams_snapshot.clone());
     if should_log {
-        log_remote_urls(&teams);
+        let port = current_port();
+        log_remote_urls(&teams_snapshot, &port);
         if let Ok(teams) = &state.source.read() {
-            log_local_urls(teams)
+            log_local_urls(teams, &port)
         }
     }
 }
@@ -284,26 +285,54 @@ async fn clear_remote(state: Arc<AppState>) {
     let _ = state.tx_remote.send(HashMap::new());
 }
 
-fn log_remote_urls(teams: &HashMap<String, PokemonTeam>) {
-    if teams.is_empty() {
-        return;
-    }
-    println!("Remote teams available:");
-    let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
-    for name in teams.keys() {
-        println!("  - http://localhost:{}/remote?team={}", port, name);
-    }
-    println!();
+async fn active_connection_snapshot(
+    active: &Arc<Mutex<Option<ActiveConnection>>>,
+) -> Option<(u64, Connection)> {
+    let guard = active.lock().await;
+    guard.as_ref().map(|active| (active.id, active.conn.clone()))
 }
 
-fn log_local_urls(teams: &HashMap<String, PokemonTeam>) {
+async fn replace_active_connection(
+    active: &Arc<Mutex<Option<ActiveConnection>>>,
+    connection_id: u64,
+    conn: &Connection,
+) -> Option<ActiveConnection> {
+    let mut guard = active.lock().await;
+    let existing = guard.take();
+    *guard = Some(ActiveConnection {
+        id: connection_id,
+        conn: conn.clone(),
+    });
+    existing
+}
+
+fn current_port() -> String {
+    env::var("PORT").unwrap_or_else(|_| "3000".to_string())
+}
+
+fn log_remote_urls(teams: &HashMap<String, PokemonTeam>, port: &str) {
     if teams.is_empty() {
         return;
     }
-    println!("Local teams available:");
-    let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    log_team_urls("Remote teams available:", "remote", port, teams);
+}
+
+fn log_local_urls(teams: &HashMap<String, PokemonTeam>, port: &str) {
+    if teams.is_empty() {
+        return;
+    }
+    log_team_urls("Local teams available:", "", port, teams);
+}
+
+fn log_team_urls(title: &str, path: &str, port: &str, teams: &HashMap<String, PokemonTeam>) {
+    println!("{}", title);
+    let base = if path.is_empty() {
+        format!("http://localhost:{}", port)
+    } else {
+        format!("http://localhost:{}/{}", port, path)
+    };
     for name in teams.keys() {
-        println!("  - http://localhost:{}?team={}", port, name);
+        println!("  - {}?team={}", base, name);
     }
     println!();
 }

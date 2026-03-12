@@ -3,6 +3,7 @@ const teamGridEl = document.getElementById("teamGrid");
 
 const params = new URLSearchParams(window.location.search);
 const teamName = params.get("team") || "team";
+const isRemoteView = window.location.pathname.startsWith("/remote");
 let currentTeam = [];
 
 function connect() {
@@ -16,7 +17,8 @@ function connect() {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      updateTeam(data[teamName]?.pokemon ?? []);
+      const teams = isRemoteView ? data.remote : data.teams;
+      updateTeam(teams?.[teamName]?.pokemon ?? []);
     } catch (error) {
       console.error("Error parsing message:", error);
     }

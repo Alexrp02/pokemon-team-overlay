@@ -1,8 +1,8 @@
+mod p2p;
 mod savefile;
+mod state;
 mod team;
 mod utils;
-mod p2p;
-mod state;
 
 use axum::{
     body::Body,
@@ -18,13 +18,13 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use notify::{Event, RecursiveMode, Watcher};
 use rust_embed::RustEmbed;
-use std::{collections::HashMap, fs, path, sync::Arc};
+use std::{collections::HashMap, env, fs, path, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
-use team::{read_team_files, PokemonTeam};
-use state::{AppState, TeamSource, SAVE_FILE_TEAM_KEY};
 use serde::Serialize;
+use state::{AppState, TeamSource, SAVE_FILE_TEAM_KEY};
+use team::{read_team_files, PokemonTeam};
 
 // ── Embedded static assets ────────────────────────────────────────────────────
 
@@ -103,7 +103,12 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(Arc::clone(&state));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .expect("Failed to bind to port 3000");
 
@@ -159,12 +164,20 @@ async fn embedded_index() -> Response<Body> {
 }
 
 async fn embedded_static(Path(path): Path<String>) -> Response<Body> {
-    let path = if path.is_empty() { "index.html" } else { path.as_str() };
+    let path = if path.is_empty() {
+        "index.html"
+    } else {
+        path.as_str()
+    };
     asset_response(path)
 }
 
 async fn embedded_remote(Path(path): Path<String>) -> Response<Body> {
-    let path = if path.is_empty() { "index.html" } else { path.as_str() };
+    let path = if path.is_empty() {
+        "index.html"
+    } else {
+        path.as_str()
+    };
     asset_response(path)
 }
 
@@ -233,7 +246,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     };
     let mut current_remote = state.remote.read().await.clone();
 
-    if send_payload(&mut sender, &current_local, &current_remote).await.is_err() {
+    if send_payload(&mut sender, &current_local, &current_remote)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -261,7 +277,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             }
         }
 
-        if send_payload(&mut sender, &current_local, &current_remote).await.is_err() {
+        if send_payload(&mut sender, &current_local, &current_remote)
+            .await
+            .is_err()
+        {
             break;
         }
     }

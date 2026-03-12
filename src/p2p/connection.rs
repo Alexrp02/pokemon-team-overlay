@@ -1,3 +1,4 @@
+use std::env;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use iroh::endpoint::Connection;
@@ -189,6 +190,9 @@ async fn update_remote(state: Arc<AppState>, teams: HashMap<String, PokemonTeam>
     let _ = state.tx_remote.send(teams.clone());
     if should_log {
         log_remote_urls(&teams);
+        if let Ok(teams) = &state.source.read() {
+            log_local_urls(teams)
+        }
     }
 }
 
@@ -197,8 +201,21 @@ fn log_remote_urls(teams: &HashMap<String, PokemonTeam>) {
         return;
     }
     println!("Remote teams available:");
+    let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     for name in teams.keys() {
-        println!("  - http://localhost:3000/remote?team={}", name);
+        println!("  - http://localhost:{}/remote?team={}", port, name);
+    }
+    println!();
+}
+
+fn log_local_urls(teams: &HashMap<String, PokemonTeam>) {
+    if teams.is_empty() {
+        return;
+    }
+    println!("Local teams available:");
+    let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    for name in teams.keys() {
+        println!("  - http://localhost:{}?team={}", port, name);
     }
     println!();
 }

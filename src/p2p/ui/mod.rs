@@ -7,6 +7,12 @@ use tokio::sync::{mpsc, watch};
 pub use model::TeamUrl;
 use model::UiSnapshot;
 
+pub enum UiAction {
+    ConnectTicket(String),
+    ToggleSourceMode,
+    SelectSaveFile,
+}
+
 #[derive(Clone)]
 pub struct UiBridge {
     snapshot_tx: watch::Sender<UiSnapshot>,
@@ -25,6 +31,12 @@ impl UiBridge {
         });
     }
 
+    pub fn set_source_mode(&self, mode: String) {
+        self.snapshot_tx.send_modify(|snapshot| {
+            snapshot.source_mode = mode;
+        });
+    }
+
     pub fn set_local_urls(&self, urls: Vec<TeamUrl>) {
         self.snapshot_tx.send_modify(|snapshot| {
             snapshot.local_urls = urls;
@@ -38,14 +50,14 @@ impl UiBridge {
     }
 }
 
-pub fn spawn_connection_ui() -> (UiBridge, mpsc::Receiver<String>) {
-    let (ticket_input_tx, ticket_input_rx) = mpsc::channel(16);
+pub fn spawn_connection_ui() -> (UiBridge, mpsc::Receiver<UiAction>) {
+    let (action_tx, action_rx) = mpsc::channel(16);
     let (snapshot_tx, snapshot_rx) = watch::channel(UiSnapshot::default());
     let ui_bridge = UiBridge {
         snapshot_tx: snapshot_tx.clone(),
     };
 
-    let ui_ticket_tx = ticket_input_tx.clone();
+    let ui_action_tx = action_tx.clone();
     std::thread::spawn(move || {
         let mut options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 640.0]),
@@ -68,15 +80,17 @@ pub fn spawn_connection_ui() -> (UiBridge, mpsc::Receiver<String>) {
             Box::new(move |_cc| {
                 Ok(Box::new(app::ConnectionUiApp::new(
                     snapshot_rx,
-                    ui_ticket_tx,
+                    ui_action_tx,
                 )))
             }),
         );
 
         if let Err(err) = result {
             eprintln!("P2P UI error: {}", err);
+            std::process::exit(1);
         }
+        std::process::exit(0);
     });
 
-    (ui_bridge, ticket_input_rx)
+    (ui_bridge, action_rx)
 }

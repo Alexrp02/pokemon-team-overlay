@@ -1,5 +1,6 @@
 mod p2p;
 mod savefile;
+mod source_picker;
 mod state;
 mod team;
 mod utils;
@@ -16,20 +17,14 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
-use notify::{Event, RecursiveMode, Watcher};
 use rust_embed::RustEmbed;
-use std::{
-    collections::HashMap,
-    env, fs,
-    path::{self, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, env, fs, path, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
 use serde::Serialize;
-use state::{AppState, TeamSource, SAVE_FILE_TEAM_KEY};
-use team::{read_team_files, PokemonTeam};
+use state::{AppState, TeamSource};
+use team::PokemonTeam;
 
 // ── Embedded static assets ────────────────────────────────────────────────────
 
@@ -42,8 +37,6 @@ struct Assets;
 const TEAM_FILE: &str = "team.txt";
 const SPRITES_DIR: &str = "sprites";
 const STATIC_DIR: &str = "static";
-const SAVE_FILE_CACHE_DIR: &str = "pokemon-team-display";
-const SAVE_FILE_CACHE_FILE: &str = "last-save-path.txt";
 
 // ── Application state ─────────────────────────────────────────────────────────
 
@@ -57,7 +50,7 @@ struct WsPayload {
 
 #[tokio::main]
 async fn main() {
-    let source = choose_team_source();
+    let source = choose_initial_team_source();
 
     // Ensure required directories exist.
     fs::create_dir_all(SPRITES_DIR).expect("Failed to create sprites directory");
@@ -73,25 +66,10 @@ async fn main() {
 
     let state = Arc::new(AppState::new(source));
 
-    // Spawn the file watcher appropriate for the chosen source.
-    let tx_watcher = state.tx.clone();
-    match &state.source {
-        TeamSource::TextFiles => {
-            tokio::spawn(async move {
-                if let Err(e) = watch_team_files(tx_watcher).await {
-                    eprintln!("File watcher error: {}", e);
-                }
-            });
-        }
-        TeamSource::SaveFile(ref path) => {
-            let path = path.clone();
-            tokio::spawn(async move {
-                if let Err(e) = watch_save_file(path, tx_watcher).await {
-                    eprintln!("Save file watcher error: {}", e);
-                }
-            });
-        }
-    }
+    let source_watch_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        watch_current_source(source_watch_state).await;
+    });
 
     let p2p_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -119,7 +97,8 @@ async fn main() {
         .await
         .expect("Failed to bind to port 3000");
 
-    match &state.source {
+    let source = state.source.read().await.clone();
+    match &source {
         TeamSource::TextFiles => {
             println!("Server running on http://0.0.0.0:3000");
             println!("Edit '{}' to update your Pokemon team", TEAM_FILE);
@@ -140,13 +119,22 @@ async fn main() {
 
 // ── Save-file selection ──────────────────────────────────────────────────────
 
-/// Choose the team source via native file picker with save-path caching.
-///
-/// If the user cancels the picker and no cached save file exists, we fall back
-/// to text-file mode to preserve previous non-savefile behavior.
-fn choose_team_source() -> TeamSource {
-    match choose_save_file_with_cache() {
-        Some(path) => TeamSource::SaveFile(path),
+fn choose_initial_team_source() -> TeamSource {
+    if let Some(cached) = source_picker::load_cached_save_path().filter(|p| p.exists()) {
+        if source_picker::validate_save_file(&cached).is_ok() {
+            return TeamSource::SaveFile(cached.to_string_lossy().into_owned());
+        }
+        eprintln!(
+            "Cached save file '{}' failed to load. Please choose a valid .sav file.",
+            cached.display()
+        );
+        if let Some(selected) = source_picker::prompt_for_valid_save_file(Some(cached.as_path())) {
+            return TeamSource::SaveFile(selected.to_string_lossy().into_owned());
+        }
+    }
+
+    match source_picker::prompt_for_valid_save_file(None) {
+        Some(path) => TeamSource::SaveFile(path.to_string_lossy().into_owned()),
         None => {
             eprintln!("No .sav file selected; falling back to text-file mode.");
             TeamSource::TextFiles
@@ -154,58 +142,45 @@ fn choose_team_source() -> TeamSource {
     }
 }
 
-fn choose_save_file_with_cache() -> Option<String> {
-    let cached_path = read_cached_save_path().filter(|path| path.exists());
+async fn watch_current_source(state: Arc<AppState>) {
+    let mut last_sent: Option<HashMap<String, PokemonTeam>> = None;
+    let mut prompted_for_save_error = false;
 
-    let mut dialog = rfd::FileDialog::new().add_filter("Pokemon save file", &["sav"]);
-    if let Some(path) = cached_path.as_ref() {
-        if let Some(parent) = path.parent() {
-            dialog = dialog.set_directory(parent);
+    loop {
+        let source = state.source.read().await.clone();
+        match source.read() {
+            Ok(teams) => {
+                prompted_for_save_error = false;
+                if last_sent.as_ref() != Some(&teams) {
+                    let _ = state.tx.send(teams.clone());
+                    last_sent = Some(teams);
+                }
+            }
+            Err(err) => {
+                eprintln!("Team source read error: {}", err);
+                if let TeamSource::SaveFile(path) = source {
+                    if !prompted_for_save_error {
+                        prompted_for_save_error = true;
+                        if let Some(selected) =
+                            source_picker::prompt_for_valid_save_file(Some(std::path::Path::new(
+                                &path,
+                            )))
+                        {
+                            let mut source = state.source.write().await;
+                            *source = TeamSource::SaveFile(selected.to_string_lossy().into_owned());
+                            continue;
+                        }
+
+                        eprintln!("No replacement save file selected. Switching to text-file mode.");
+                        let mut source = state.source.write().await;
+                        *source = TeamSource::TextFiles;
+                    }
+                }
+            }
         }
-        if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
-            dialog = dialog.set_file_name(file_name);
-        }
-    }
 
-    let selected = dialog.pick_file().or(cached_path);
-    let selected = selected?;
-    persist_cached_save_path(&selected);
-    Some(selected.to_string_lossy().into_owned())
-}
-
-fn read_cached_save_path() -> Option<PathBuf> {
-    let cache_file = save_file_cache_path()?;
-    let raw = fs::read_to_string(cache_file).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
-    Some(PathBuf::from(trimmed))
-}
-
-fn persist_cached_save_path(path: &std::path::Path) {
-    let Some(cache_file) = save_file_cache_path() else {
-        return;
-    };
-    let Some(parent) = cache_file.parent() else {
-        return;
-    };
-    if let Err(err) = fs::create_dir_all(parent) {
-        eprintln!("Failed to create save-path cache directory: {}", err);
-        return;
-    }
-    if let Err(err) = fs::write(cache_file, path.to_string_lossy().as_ref()) {
-        eprintln!("Failed to persist save-path cache: {}", err);
-    }
-}
-
-fn save_file_cache_path() -> Option<PathBuf> {
-    let config_dir = dirs::config_dir()?;
-    Some(
-        config_dir
-            .join(SAVE_FILE_CACHE_DIR)
-            .join(SAVE_FILE_CACHE_FILE),
-    )
 }
 
 // ── Static asset handler ──────────────────────────────────────────────────────
@@ -288,7 +263,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // Send the current team state immediately on connect.
     // (The broadcast channel drops past messages for new subscribers, so we
     //  re-read directly from the source here.)
-    let mut current_local = match state.source.read() {
+    let local_source = state.source.read().await.clone();
+    let mut current_local = match local_source.read() {
         Ok(team) => team,
         Err(err) => {
             eprintln!("Failed to read local teams: {}", err);
@@ -334,210 +310,5 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         {
             break;
         }
-    }
-}
-
-// ── File watchers ─────────────────────────────────────────────────────────────
-
-/// Watch all `*team*.txt` files in the current directory for changes and
-/// broadcast updated team data on each change (with a 300 ms debounce).
-async fn watch_team_files(
-    tx: broadcast::Sender<HashMap<String, PokemonTeam>>,
-) -> notify::Result<()> {
-    use notify::{Config, EventKind};
-
-    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(100);
-
-    let config = Config::default().with_poll_interval(std::time::Duration::from_secs(1));
-    let mut watcher = notify::RecommendedWatcher::new(
-        move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                let _ = notify_tx.blocking_send(event);
-            }
-        },
-        config,
-    )?;
-
-    watcher.watch(path::Path::new("."), RecursiveMode::NonRecursive)?;
-
-    // Broadcast the initial state.
-    if let Ok(team) = read_team_files() {
-        let _ = tx.send(team);
-    }
-
-    let debounce_duration = std::time::Duration::from_millis(300);
-    let mut debounce_deadline: Option<tokio::time::Instant> = None;
-
-    loop {
-        let timeout = match debounce_deadline {
-            Some(deadline) => {
-                let now = tokio::time::Instant::now();
-                if now >= deadline {
-                    debounce_deadline = None;
-                    if let Ok(team) = read_team_files() {
-                        let _ = tx.send(team);
-                    }
-                    continue;
-                }
-                deadline - now
-            }
-            None => std::time::Duration::from_secs(3600),
-        };
-
-        tokio::select! {
-            event_result = notify_rx.recv() => {
-                match event_result {
-                    Some(event) => {
-                        let is_team_file = event.paths.iter().any(|p| {
-                            p.file_name().map_or(false, |name| {
-                                let name = name.to_string_lossy();
-                                name.contains("team")
-                                    && name.ends_with(".txt")
-                                    && !name.ends_with('~')
-                                    && !name.ends_with(".swp")
-                                    && !name.ends_with(".tmp")
-                            })
-                        });
-
-                        if !is_team_file {
-                            continue;
-                        }
-
-                        match event.kind {
-                            EventKind::Modify(_)
-                            | EventKind::Create(_)
-                            | EventKind::Remove(_)
-                            | EventKind::Any => {
-                                debounce_deadline =
-                                    Some(tokio::time::Instant::now() + debounce_duration);
-                            }
-                            _ => {}
-                        }
-                    }
-                    None => {
-                        eprintln!("File watcher channel closed");
-                        break;
-                    }
-                }
-            }
-            _ = tokio::time::sleep(timeout) => {
-                // Debounce timer expired; handled at the top of the next iteration.
-                continue;
-            }
-        }
-    }
-
-    drop(watcher);
-    Ok(())
-}
-
-/// Watch a single save file for changes and broadcast the party on each change
-/// (with a 300 ms debounce).
-async fn watch_save_file(
-    save_path: String,
-    tx: broadcast::Sender<HashMap<String, PokemonTeam>>,
-) -> notify::Result<()> {
-    use notify::{Config, EventKind};
-
-    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(100);
-
-    let config = Config::default().with_poll_interval(std::time::Duration::from_secs(1));
-    let mut watcher = notify::RecommendedWatcher::new(
-        move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                let _ = notify_tx.blocking_send(event);
-            }
-        },
-        config,
-    )?;
-
-    // Watch the directory containing the save file so we catch atomic writes
-    // (where the editor replaces the file rather than modifying it in-place).
-    let watch_dir = path::Path::new(&save_path)
-        .parent()
-        .unwrap_or(path::Path::new("."));
-    watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
-
-    // Broadcast the initial party.
-    broadcast_save(&save_path, &tx);
-
-    let debounce_duration = std::time::Duration::from_millis(300);
-    let mut debounce_deadline: Option<tokio::time::Instant> = None;
-    let save_filename = path::Path::new(&save_path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
-    loop {
-        let timeout = match debounce_deadline {
-            Some(deadline) => {
-                let now = tokio::time::Instant::now();
-                if now >= deadline {
-                    debounce_deadline = None;
-                    broadcast_save(&save_path, &tx);
-                    continue;
-                }
-                deadline - now
-            }
-            None => std::time::Duration::from_secs(3600),
-        };
-
-        tokio::select! {
-            event_result = notify_rx.recv() => {
-                match event_result {
-                    Some(event) => {
-                        let is_save_file = event.paths.iter().any(|p| {
-                            p.file_name()
-                                .map(|n| n.to_string_lossy() == save_filename)
-                                .unwrap_or(false)
-                        });
-
-                        if !is_save_file {
-                            continue;
-                        }
-
-                        match event.kind {
-                            EventKind::Modify(_)
-                            | EventKind::Create(_)
-                            | EventKind::Remove(_)
-                            | EventKind::Any => {
-                                debounce_deadline =
-                                    Some(tokio::time::Instant::now() + debounce_duration);
-                            }
-                            _ => {}
-                        }
-                    }
-                    None => {
-                        eprintln!("File watcher channel closed");
-                        break;
-                    }
-                }
-            }
-            _ = tokio::time::sleep(timeout) => {
-                continue;
-            }
-        }
-    }
-
-    drop(watcher);
-    Ok(())
-}
-
-/// Read the save file at `path`, parse the party, and broadcast it.
-/// Errors are printed to stderr and silently ignored so the watcher keeps running.
-fn broadcast_save(path: &str, tx: &broadcast::Sender<HashMap<String, PokemonTeam>>) {
-    match fs::read(path) {
-        Ok(data) => match savefile::read_party(&data) {
-            Ok(slots) => {
-                let mut map = HashMap::new();
-                map.insert(
-                    SAVE_FILE_TEAM_KEY.to_string(),
-                    PokemonTeam::from_slots(slots),
-                );
-                let _ = tx.send(map);
-            }
-            Err(e) => eprintln!("Failed to parse save file: {}", e),
-        },
-        Err(e) => eprintln!("Failed to read save file '{}': {}", path, e),
     }
 }

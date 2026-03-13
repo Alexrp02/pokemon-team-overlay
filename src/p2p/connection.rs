@@ -6,13 +6,14 @@ use iroh::endpoint::Connection;
 use iroh::Endpoint;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::state::AppState;
+use crate::source_picker;
+use crate::state::{AppState, TeamSource};
 use crate::team::PokemonTeam;
 
 use super::error::P2pError;
 use super::protocol::{TeamsMessage, ALPN};
 use super::ticket::{create_ticket, parse_ticket};
-use super::ui::{spawn_connection_ui, TeamUrl, UiBridge};
+use super::ui::{spawn_connection_ui, TeamUrl, UiAction, UiBridge};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -42,6 +43,7 @@ pub async fn run(state: Arc<AppState>) -> Result<(), P2pError> {
     let ticket = create_ticket(endpoint.addr());
     ui.set_local_ticket(ticket.clone());
     ui.set_status("Waiting for peer ticket or inbound connection...".to_string());
+    ui.set_source_mode(source_mode_label(&state).await);
     refresh_ui_urls(&state, &ui).await;
 
     println!();
@@ -129,22 +131,36 @@ async fn connect_ticket_loop(
     active: Arc<Mutex<Option<ActiveConnection>>>,
     next_id: Arc<AtomicU64>,
     ui: UiBridge,
-    mut ticket_rx: mpsc::Receiver<String>,
+    mut actions: mpsc::Receiver<UiAction>,
 ) {
-    while let Some(ticket) = ticket_rx.recv().await {
-        ui.set_status("Connecting to peer...".to_string());
-        if let Err(err) = connect_with_ticket(
-            &endpoint,
-            &ticket,
-            state.clone(),
-            active.clone(),
-            next_id.clone(),
-            ui.clone(),
-        )
-        .await
-        {
-            eprintln!("P2P connect error: {}", err);
-            ui.set_status(format!("Connect failed: {}", err));
+    while let Some(action) = actions.recv().await {
+        match action {
+            UiAction::ConnectTicket(ticket) => {
+                ui.set_status("Connecting to peer...".to_string());
+                if let Err(err) = connect_with_ticket(
+                    &endpoint,
+                    &ticket,
+                    state.clone(),
+                    active.clone(),
+                    next_id.clone(),
+                    ui.clone(),
+                )
+                .await
+                {
+                    eprintln!("P2P connect error: {}", err);
+                    ui.set_status(format!("Connect failed: {}", err));
+                }
+            }
+            UiAction::ToggleSourceMode => {
+                switch_source_mode(state.clone(), &ui).await;
+                ui.set_source_mode(source_mode_label(&state).await);
+                refresh_ui_urls(&state, &ui).await;
+            }
+            UiAction::SelectSaveFile => {
+                select_save_file(state.clone(), &ui).await;
+                ui.set_source_mode(source_mode_label(&state).await);
+                refresh_ui_urls(&state, &ui).await;
+            }
         }
     }
 }
@@ -181,7 +197,8 @@ async fn handle_connection(
         println!("P2P connection replaced. Waiting for new teams...");
     }
 
-    if let Ok(local) = state.source.read() {
+    let local_source = state.source.read().await.clone();
+    if let Ok(local) = local_source.read() {
         if let Err(err) = send_teams(&conn, &local).await {
             eprintln!("P2P initial send error: {}", err);
         }
@@ -314,8 +331,9 @@ async fn update_remote(state: Arc<AppState>, teams: HashMap<String, PokemonTeam>
     if should_log {
         let port = current_port();
         log_remote_urls(&teams_snapshot, &port);
-        if let Ok(teams) = &state.source.read() {
-            log_local_urls(teams, &port)
+        let local_source = state.source.read().await.clone();
+        if let Ok(teams) = local_source.read() {
+            log_local_urls(&teams, &port)
         }
     }
 }
@@ -409,7 +427,8 @@ fn log_team_urls(title: &str, path: &str, port: &str, teams: &HashMap<String, Po
 }
 
 async fn refresh_ui_urls(state: &Arc<AppState>, ui: &UiBridge) {
-    let local = match state.source.read() {
+    let local_source = state.source.read().await.clone();
+    let local = match local_source.read() {
         Ok(teams) => teams,
         Err(err) => {
             eprintln!("Failed to read local teams for UI: {}", err);
@@ -421,6 +440,63 @@ async fn refresh_ui_urls(state: &Arc<AppState>, ui: &UiBridge) {
 
     ui.set_local_urls(team_url_rows("", &port, &local));
     ui.set_remote_urls(team_url_rows("remote", &port, &remote));
+    ui.set_source_mode(source_mode_label(state).await);
+}
+
+async fn source_mode_label(state: &Arc<AppState>) -> String {
+    match state.source.read().await.clone() {
+        TeamSource::TextFiles => "Team files (*.txt)".to_string(),
+        TeamSource::SaveFile(path) => format!(".sav file ({})", path),
+    }
+}
+
+async fn switch_source_mode(state: Arc<AppState>, ui: &UiBridge) {
+    let current = state.source.read().await.clone();
+    match current {
+        TeamSource::TextFiles => {
+            let cached = source_picker::load_cached_save_path().filter(|p| p.exists());
+            let selected = if let Some(cached) = cached {
+                if source_picker::validate_save_file(&cached).is_ok() {
+                    Some(cached)
+                } else {
+                    source_picker::prompt_for_valid_save_file(Some(cached.as_path()))
+                }
+            } else {
+                source_picker::prompt_for_valid_save_file(None)
+            };
+
+            if let Some(path) = selected {
+                let mut source = state.source.write().await;
+                *source = TeamSource::SaveFile(path.to_string_lossy().into_owned());
+                ui.set_status("Switched to save-file mode.".to_string());
+            } else {
+                ui.set_status("Save-file selection cancelled. Staying in team-file mode.".to_string());
+            }
+        }
+        TeamSource::SaveFile(_) => {
+            let mut source = state.source.write().await;
+            *source = TeamSource::TextFiles;
+            ui.set_status("Switched to team-file mode.".to_string());
+        }
+    }
+}
+
+async fn select_save_file(state: Arc<AppState>, ui: &UiBridge) {
+    let default = match state.source.read().await.clone() {
+        TeamSource::SaveFile(path) => Some(std::path::PathBuf::from(path)),
+        TeamSource::TextFiles => source_picker::load_cached_save_path(),
+    };
+
+    match source_picker::prompt_for_valid_save_file(default.as_deref()) {
+        Some(path) => {
+            let mut source = state.source.write().await;
+            *source = TeamSource::SaveFile(path.to_string_lossy().into_owned());
+            ui.set_status("Selected a new save file.".to_string());
+        }
+        None => {
+            ui.set_status("Save-file selection cancelled.".to_string());
+        }
+    }
 }
 
 fn team_url_rows(path: &str, port: &str, teams: &HashMap<String, PokemonTeam>) -> Vec<TeamUrl> {

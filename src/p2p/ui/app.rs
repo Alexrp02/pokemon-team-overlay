@@ -4,11 +4,12 @@ use eframe::egui;
 use tokio::sync::{mpsc, watch};
 
 use super::model::{TeamUrl, UiSnapshot};
+use super::UiAction;
 
 pub struct ConnectionUiApp {
     snapshot_rx: watch::Receiver<UiSnapshot>,
     snapshot: UiSnapshot,
-    ticket_input_tx: mpsc::Sender<String>,
+    action_tx: mpsc::Sender<UiAction>,
     ticket_input: String,
     local_status: Option<String>,
 }
@@ -16,13 +17,13 @@ pub struct ConnectionUiApp {
 impl ConnectionUiApp {
     pub fn new(
         snapshot_rx: watch::Receiver<UiSnapshot>,
-        ticket_input_tx: mpsc::Sender<String>,
+        action_tx: mpsc::Sender<UiAction>,
     ) -> Self {
         let snapshot = snapshot_rx.borrow().clone();
         Self {
             snapshot_rx,
             snapshot,
-            ticket_input_tx,
+            action_tx,
             ticket_input: String::new(),
             local_status: None,
         }
@@ -67,12 +68,29 @@ impl ConnectionUiApp {
             let trimmed = self.ticket_input.trim();
             if trimmed.is_empty() {
                 self.local_status = Some("Please enter a ticket.".to_string());
-            } else if self.ticket_input_tx.try_send(trimmed.to_string()).is_err() {
+            } else if self
+                .action_tx
+                .try_send(UiAction::ConnectTicket(trimmed.to_string()))
+                .is_err()
+            {
                 self.local_status = Some("Unable to submit ticket right now.".to_string());
             } else {
                 self.ticket_input.clear();
                 self.local_status = Some("Ticket submitted. Connecting...".to_string());
             }
+        }
+
+        ui.separator();
+        ui.label(format!("Source mode: {}", self.snapshot.source_mode));
+        if ui.button("Switch mode").clicked()
+            && self.action_tx.try_send(UiAction::ToggleSourceMode).is_err()
+        {
+            self.local_status = Some("Unable to switch mode right now.".to_string());
+        }
+        if ui.button("Change selected .sav file").clicked()
+            && self.action_tx.try_send(UiAction::SelectSaveFile).is_err()
+        {
+            self.local_status = Some("Unable to open save-file picker right now.".to_string());
         }
     }
 }

@@ -2,6 +2,7 @@
 pub struct UiSnapshot {
     pub local_ticket: String,
     pub status: String,
+    pub source_mode: String,
     pub local_urls: Vec<TeamUrl>,
     pub remote_urls: Vec<TeamUrl>,
 }

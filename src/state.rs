@@ -38,7 +38,7 @@ impl TeamSource {
 pub struct AppState {
     pub tx: broadcast::Sender<HashMap<String, PokemonTeam>>,
     pub tx_remote: broadcast::Sender<HashMap<String, PokemonTeam>>,
-    pub source: TeamSource,
+    pub source: RwLock<TeamSource>,
     pub remote: RwLock<HashMap<String, PokemonTeam>>,
 }
 
@@ -49,7 +49,7 @@ impl AppState {
         Self {
             tx,
             tx_remote,
-            source,
+            source: RwLock::new(source),
             remote: RwLock::new(HashMap::new()),
         }
     }

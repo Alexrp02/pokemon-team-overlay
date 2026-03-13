@@ -1,8 +1,8 @@
 mod connection;
 mod error;
-mod input;
 mod protocol;
 mod ticket;
+mod ui;
 
 pub use error::P2pError;
 

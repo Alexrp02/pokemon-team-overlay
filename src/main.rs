@@ -18,7 +18,12 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use notify::{Event, RecursiveMode, Watcher};
 use rust_embed::RustEmbed;
-use std::{collections::HashMap, env, fs, path, sync::Arc};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{self, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
@@ -37,6 +42,8 @@ struct Assets;
 const TEAM_FILE: &str = "team.txt";
 const SPRITES_DIR: &str = "sprites";
 const STATIC_DIR: &str = "static";
+const SAVE_FILE_CACHE_DIR: &str = "pokemon-team-display";
+const SAVE_FILE_CACHE_FILE: &str = "last-save-path.txt";
 
 // ── Application state ─────────────────────────────────────────────────────────
 
@@ -50,7 +57,7 @@ struct WsPayload {
 
 #[tokio::main]
 async fn main() {
-    let source = parse_args();
+    let source = choose_team_source();
 
     // Ensure required directories exist.
     fs::create_dir_all(SPRITES_DIR).expect("Failed to create sprites directory");
@@ -131,30 +138,74 @@ async fn main() {
         .expect("Failed to start server");
 }
 
-// ── Argument parsing ──────────────────────────────────────────────────────────
+// ── Save-file selection ──────────────────────────────────────────────────────
 
-/// Parse command-line arguments and return the appropriate [`TeamSource`].
+/// Choose the team source via native file picker with save-path caching.
 ///
-/// Usage:
-/// ```
-/// pokemon-team-display                        # text-file mode
-/// pokemon-team-display --save-file <path>     # save-file mode
-/// ```
-fn parse_args() -> TeamSource {
-    let args: Vec<String> = std::env::args().collect();
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--save-file" {
-            if let Some(path) = args.get(i + 1) {
-                return TeamSource::SaveFile(path.clone());
-            } else {
-                eprintln!("Error: --save-file requires a path argument");
-                std::process::exit(1);
-            }
+/// If the user cancels the picker and no cached save file exists, we fall back
+/// to text-file mode to preserve previous non-savefile behavior.
+fn choose_team_source() -> TeamSource {
+    match choose_save_file_with_cache() {
+        Some(path) => TeamSource::SaveFile(path),
+        None => {
+            eprintln!("No .sav file selected; falling back to text-file mode.");
+            TeamSource::TextFiles
         }
-        i += 1;
     }
-    TeamSource::TextFiles
+}
+
+fn choose_save_file_with_cache() -> Option<String> {
+    let cached_path = read_cached_save_path().filter(|path| path.exists());
+
+    let mut dialog = rfd::FileDialog::new().add_filter("Pokemon save file", &["sav"]);
+    if let Some(path) = cached_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            dialog = dialog.set_directory(parent);
+        }
+        if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
+            dialog = dialog.set_file_name(file_name);
+        }
+    }
+
+    let selected = dialog.pick_file().or(cached_path);
+    let selected = selected?;
+    persist_cached_save_path(&selected);
+    Some(selected.to_string_lossy().into_owned())
+}
+
+fn read_cached_save_path() -> Option<PathBuf> {
+    let cache_file = save_file_cache_path()?;
+    let raw = fs::read_to_string(cache_file).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
+fn persist_cached_save_path(path: &std::path::Path) {
+    let Some(cache_file) = save_file_cache_path() else {
+        return;
+    };
+    let Some(parent) = cache_file.parent() else {
+        return;
+    };
+    if let Err(err) = fs::create_dir_all(parent) {
+        eprintln!("Failed to create save-path cache directory: {}", err);
+        return;
+    }
+    if let Err(err) = fs::write(cache_file, path.to_string_lossy().as_ref()) {
+        eprintln!("Failed to persist save-path cache: {}", err);
+    }
+}
+
+fn save_file_cache_path() -> Option<PathBuf> {
+    let config_dir = dirs::config_dir()?;
+    Some(
+        config_dir
+            .join(SAVE_FILE_CACHE_DIR)
+            .join(SAVE_FILE_CACHE_FILE),
+    )
 }
 
 // ── Static asset handler ──────────────────────────────────────────────────────

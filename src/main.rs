@@ -1,4 +1,6 @@
+mod p2p;
 mod savefile;
+mod state;
 mod team;
 mod utils;
 
@@ -16,10 +18,12 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use notify::{Event, RecursiveMode, Watcher};
 use rust_embed::RustEmbed;
-use std::{collections::HashMap, fs, path, sync::Arc};
+use std::{collections::HashMap, env, fs, path, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
+use serde::Serialize;
+use state::{AppState, TeamSource, SAVE_FILE_TEAM_KEY};
 use team::{read_team_files, PokemonTeam};
 
 // ── Embedded static assets ────────────────────────────────────────────────────
@@ -34,43 +38,12 @@ const TEAM_FILE: &str = "team.txt";
 const SPRITES_DIR: &str = "sprites";
 const STATIC_DIR: &str = "static";
 
-/// Key used in the team map when the source is a save file.
-const SAVE_FILE_TEAM_KEY: &str = "team";
-
-// ── Team source ───────────────────────────────────────────────────────────────
-
-/// Describes where the overlay should obtain its team data.
-enum TeamSource {
-    /// Read one or more `*team*.txt` files from the current directory.
-    TextFiles,
-    /// Parse a HeartGold / SoulSilver save file at the given path.
-    SaveFile(String),
-}
-
-impl TeamSource {
-    /// Read the current team data from whichever source is configured.
-    fn read(&self) -> Result<HashMap<String, PokemonTeam>, String> {
-        match self {
-            TeamSource::TextFiles => read_team_files().map_err(|e| e.to_string()),
-            TeamSource::SaveFile(path) => {
-                let data = fs::read(path).map_err(|e| e.to_string())?;
-                let slots = savefile::read_party(&data)?;
-                let mut map = HashMap::new();
-                map.insert(
-                    SAVE_FILE_TEAM_KEY.to_string(),
-                    PokemonTeam::from_slots(slots),
-                );
-                Ok(map)
-            }
-        }
-    }
-}
-
 // ── Application state ─────────────────────────────────────────────────────────
 
-struct AppState {
-    tx: broadcast::Sender<HashMap<String, PokemonTeam>>,
-    source: TeamSource,
+#[derive(Serialize)]
+struct WsPayload {
+    teams: HashMap<String, PokemonTeam>,
+    remote: HashMap<String, PokemonTeam>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -91,14 +64,10 @@ async fn main() {
         }
     }
 
-    let (tx, _) = broadcast::channel::<HashMap<String, PokemonTeam>>(100);
-    let state = Arc::new(AppState {
-        tx: tx.clone(),
-        source,
-    });
+    let state = Arc::new(AppState::new(source));
 
     // Spawn the file watcher appropriate for the chosen source.
-    let tx_watcher = tx.clone();
+    let tx_watcher = state.tx.clone();
     match &state.source {
         TeamSource::TextFiles => {
             tokio::spawn(async move {
@@ -117,18 +86,29 @@ async fn main() {
         }
     }
 
+    let p2p_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        if let Err(e) = p2p::start(p2p_state).await {
+            eprintln!("P2P error: {}", e);
+        }
+    });
+
     let app = Router::new()
         .route("/ws", get(websocket_handler))
         .nest_service("/sprites", ServeDir::new(SPRITES_DIR))
-        .route(
-            "/",
-            get(|| async { embedded_static(Path("".into())).await }),
-        )
+        .route("/", get(embedded_index))
+        .route("/remote", get(embedded_index))
+        .route("/remote/*path", get(embedded_remote))
         .route("/*path", get(embedded_static))
         .layer(CorsLayer::permissive())
         .with_state(Arc::clone(&state));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .expect("Failed to bind to port 3000");
 
@@ -179,13 +159,29 @@ fn parse_args() -> TeamSource {
 
 // ── Static asset handler ──────────────────────────────────────────────────────
 
+async fn embedded_index() -> Response<Body> {
+    asset_response("index.html")
+}
+
 async fn embedded_static(Path(path): Path<String>) -> Response<Body> {
     let path = if path.is_empty() {
         "index.html"
     } else {
         path.as_str()
     };
+    asset_response(path)
+}
 
+async fn embedded_remote(Path(path): Path<String>) -> Response<Body> {
+    let path = if path.is_empty() {
+        "index.html"
+    } else {
+        path.as_str()
+    };
+    asset_response(path)
+}
+
+fn asset_response(path: &str) -> Response<Body> {
     match Assets::get(path) {
         Some(file) => Response::builder()
             .status(StatusCode::OK)
@@ -200,6 +196,30 @@ async fn embedded_static(Path(path): Path<String>) -> Response<Body> {
     }
 }
 
+async fn send_payload(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    teams: &HashMap<String, PokemonTeam>,
+    remote: &HashMap<String, PokemonTeam>,
+) -> Result<(), ()> {
+    let payload = WsPayload {
+        teams: teams.clone(),
+        remote: remote.clone(),
+    };
+    match serde_json::to_string(&payload) {
+        Ok(json) => {
+            if sender.send(Message::Text(json)).await.is_err() {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to serialize websocket payload: {}", err);
+            Err(())
+        }
+    }
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 
 async fn websocket_handler(
@@ -211,21 +231,56 @@ async fn websocket_handler(
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, _receiver) = socket.split();
-    let mut rx = state.tx.subscribe();
+    let mut rx_local = state.tx.subscribe();
+    let mut rx_remote = state.tx_remote.subscribe();
 
     // Send the current team state immediately on connect.
     // (The broadcast channel drops past messages for new subscribers, so we
     //  re-read directly from the source here.)
-    if let Ok(team) = state.source.read() {
-        let json = serde_json::to_string(&team).unwrap();
-        if sender.send(Message::Text(json)).await.is_err() {
-            return;
+    let mut current_local = match state.source.read() {
+        Ok(team) => team,
+        Err(err) => {
+            eprintln!("Failed to read local teams: {}", err);
+            HashMap::new()
         }
+    };
+    let mut current_remote = state.remote.read().await.clone();
+
+    if send_payload(&mut sender, &current_local, &current_remote)
+        .await
+        .is_err()
+    {
+        return;
     }
 
-    while let Ok(team) = rx.recv().await {
-        let json = serde_json::to_string(&team).unwrap();
-        if sender.send(Message::Text(json)).await.is_err() {
+    loop {
+        tokio::select! {
+            local_update = rx_local.recv() => {
+                match local_update {
+                    Ok(team) => current_local = team,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("Local team updates lagged; skipped {} updates", skipped);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            remote_update = rx_remote.recv() => {
+                match remote_update {
+                    Ok(team) => current_remote = team,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("Remote team updates lagged; skipped {} updates", skipped);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+
+        if send_payload(&mut sender, &current_local, &current_remote)
+            .await
+            .is_err()
+        {
             break;
         }
     }

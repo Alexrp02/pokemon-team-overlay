@@ -74,6 +74,14 @@ pub fn spawn_connection_ui() -> (UiBridge, mpsc::Receiver<UiAction>) {
             }));
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            options.event_loop_builder = Some(Box::new(|builder| {
+                use winit::platform::windows::EventLoopBuilderExtWindows;
+                EventLoopBuilderExtWindows::with_any_thread(builder, true);
+            }));
+        }
+
         let result = eframe::run_native(
             "Pokemon Team Overlay - P2P",
             options,

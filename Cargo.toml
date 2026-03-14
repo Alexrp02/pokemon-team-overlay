@@ -16,6 +16,10 @@ tokio-stream = "0.1"
 rust-embed = "8.11.0"
 iroh = { version = "0.96.1", default-features = false }
 iroh-tickets = "0.3.0"
+eframe = "0.29"
+winit = "0.30.13"
+rfd = "0.15"
+dirs = "5"
 
 [profile.release]
 lto = true

@@ -1,6 +1,8 @@
-use std::{fmt, io, time::Duration};
+use std::{fmt, time::Duration};
 
-use iroh::endpoint::{BindError, ClosedStream, ConnectError, ConnectionError, ReadToEndError, WriteError};
+use iroh::endpoint::{
+    BindError, ClosedStream, ConnectError, ConnectionError, ReadToEndError, WriteError,
+};
 use iroh_tickets::ParseError as TicketParseError;
 use serde_json::Error as JsonError;
 
@@ -16,7 +18,6 @@ pub enum P2pError {
     Write(WriteError),
     Finish(ClosedStream),
     Json(JsonError),
-    Input(io::Error),
 }
 
 impl fmt::Display for P2pError {
@@ -24,7 +25,11 @@ impl fmt::Display for P2pError {
         match self {
             P2pError::EndpointBind(err) => write!(f, "failed to bind iroh endpoint: {}", err),
             P2pError::EndpointOnlineTimeout(timeout) => {
-                write!(f, "timed out waiting for iroh to come online after {:?}", timeout)
+                write!(
+                    f,
+                    "timed out waiting for iroh to come online after {:?}",
+                    timeout
+                )
             }
             P2pError::TicketParse(err) => write!(f, "failed to parse ticket: {}", err),
             P2pError::TicketEmpty => write!(f, "ticket input was empty"),
@@ -34,7 +39,6 @@ impl fmt::Display for P2pError {
             P2pError::Write(err) => write!(f, "failed to write to peer: {}", err),
             P2pError::Finish(err) => write!(f, "failed to finish send stream: {}", err),
             P2pError::Json(err) => write!(f, "failed to serialize/deserialize json: {}", err),
-            P2pError::Input(err) => write!(f, "failed to read ticket input: {}", err),
         }
     }
 }

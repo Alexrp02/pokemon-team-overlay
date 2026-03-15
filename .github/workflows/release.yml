@@ -21,7 +21,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2  # Needed for diff
+      - name: Check if version line changed in Cargo.toml
+        id: version_change
+        run: |
+          if git diff HEAD^ HEAD -- Cargo.toml | grep '^+version = ' > /dev/null; then
+            echo "Version line changed, continuing."
+          else
+            echo "Version line did not change, skipping workflow."
+            exit 0
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

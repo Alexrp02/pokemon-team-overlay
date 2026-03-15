@@ -93,7 +93,12 @@ jobs:
           args: --latest --strip header
       - name: Get most recent commit message for Cargo.toml
         id: commitmsg
-        run: echo "msg=$(git log -1 --pretty=%b -- Cargo.toml)" >> $GITHUB_OUTPUT
+        run: |
+          {
+            echo 'msg<<EOF'
+            git log -1 --pretty=%b -- Cargo.toml
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
       - name: Combine release notes
         run: |
           {

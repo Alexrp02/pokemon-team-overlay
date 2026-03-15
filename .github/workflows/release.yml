@@ -11,33 +11,55 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-gnu
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: |
-            x86_64-unknown-linux-gnu
-            x86_64-pc-windows-gnu
-
-      - name: Install cross-compilation tools
+          targets: ${{ matrix.target }}
+      - name: Install cross tools (Windows)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Archive binary
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mingw-w64
+          BIN_NAME=$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].name')
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == "x86_64-pc-windows-gnu" ]]; then
+            cp target/${{ matrix.target }}/release/$BIN_NAME.exe dist/${BIN_NAME}-windows-x86_64.exe
+          else
+            cp target/${{ matrix.target }}/release/$BIN_NAME dist/${BIN_NAME}-linux-x86_64
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
 
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
       - name: Extract version from Cargo.toml
         id: version
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Get latest release tag
         id: latest_release
         env:
@@ -45,63 +67,38 @@ jobs:
         run: |
           TAG=$(gh release view --json tagName --jq .tagName 2>/dev/null || echo "")
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-
       - name: Check if version already released
         if: steps.latest_release.outputs.tag == format('v{0}', steps.version.outputs.version)
         run: |
           echo "Version already released. Exiting."
           exit 0
-
-      - name: Build Linux binary
-        run: |
-          cargo build --release --target x86_64-unknown-linux-gnu
-
-      - name: Build Windows binary
-        run: |
-          cargo build --release --target x86_64-pc-windows-gnu
-
-      - name: Prepare artifacts
-        run: |
-          BIN_NAME=$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].name')
-
-          mkdir dist
-          cp target/x86_64-unknown-linux-gnu/release/$BIN_NAME \
-             dist/${BIN_NAME}-linux-x86_64
-          cp target/x86_64-pc-windows-gnu/release/$BIN_NAME.exe \
-             dist/${BIN_NAME}-windows-x86_64.exe
-
-      - name: Install git-cliff
-        run: cargo install git-cliff
-
       - name: Create release tag
         run: |
-          git tag v${{ steps.version.outputs.version }}
-
-      - name: Push release tag
-        run: |
-          git push origin v${{ steps.version.outputs.version }}
-
+          git tag -f v${{ steps.version.outputs.version }}
+          git push origin v${{ steps.version.outputs.version }} --force
       - name: Generate release notes
+        uses: orhun/git-cliff-action@v4
+        id: cliff
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+      - name: Get most recent commit message for Cargo.toml
+        id: commitmsg
+        run: echo "msg=$(git log -1 --pretty=%b -- Cargo.toml)" >> $GITHUB_OUTPUT
+      - name: Combine release notes
         run: |
-          COMMIT_MSG=$(git log -1 --pretty=%b -- Cargo.toml)
-          COMMIT_CHANGELOG=$(git cliff --latest --strip header)
           {
             echo "## 📝 Release Summary"
             echo
-            echo "$COMMIT_MSG"
+            echo "${{ steps.commitmsg.outputs.msg }}"
             echo
             echo "-----"
             echo
-            echo "$COMMIT_CHANGELOG"
+            echo "${{ steps.cliff.outputs.content }}"
           } > RELEASE_NOTES.md
-
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${{ steps.version.outputs.version }}
-
-          gh release create v$VERSION \
-            dist/* \
-            --title "v$VERSION" \
-            --notes-file RELEASE_NOTES.md
+          gh release create v$VERSION dist/* --title "v$VERSION" --notes-file RELEASE_NOTES.md

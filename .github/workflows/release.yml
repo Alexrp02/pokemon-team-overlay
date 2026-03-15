@@ -137,4 +137,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${{ steps.version.outputs.version }}
-          gh release create v$VERSION dist/* --title "v$VERSION" --notes-file RELEASE_NOTES.md
+          gh release create v$VERSION dist/**/* --title "v$VERSION" --notes-file RELEASE_NOTES.md

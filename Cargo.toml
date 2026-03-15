@@ -16,11 +16,19 @@ tokio-stream = "0.1"
 rust-embed = "8.11.0"
 iroh = { version = "0.96.1", default-features = false }
 iroh-tickets = "0.3.0"
-eframe = "0.29"
-winit = "0.30.13"
+iced = { version = "0.14", features = ["tokio"] }
 rfd = "0.15"
+arboard = "3"
 dirs = "5"
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Fast iteration profile: full optimizations but no LTO and parallel codegen.
+# Use with: cargo build --profile release-dev
+[profile.release-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+

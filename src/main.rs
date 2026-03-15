@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod p2p;
 mod savefile;
 mod source_picker;
@@ -48,8 +50,7 @@ struct WsPayload {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let source = choose_initial_team_source();
 
     // Ensure required directories exist.
@@ -64,57 +65,78 @@ async fn main() {
         }
     }
 
-    let state = Arc::new(AppState::new(source));
+    // Build the iced UI on the main thread (required by winit / most OS window
+    // systems).  The Tokio runtime runs on a background thread instead.
+    let (ui_runner, ui_bridge, action_rx) = p2p::build_connection_ui();
 
-    let source_watch_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        watch_current_source(source_watch_state).await;
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build Tokio runtime");
+
+        rt.block_on(async move {
+            let state = Arc::new(AppState::new(source));
+
+            let source_watch_state = Arc::clone(&state);
+            tokio::spawn(async move {
+                watch_current_source(source_watch_state).await;
+            });
+
+            let p2p_state = Arc::clone(&state);
+            let p2p_ui = ui_bridge;
+            tokio::spawn(async move {
+                if let Err(e) = p2p::start(p2p_state, p2p_ui, action_rx).await {
+                    eprintln!("P2P error: {}", e);
+                }
+            });
+
+            let app = Router::new()
+                .route("/ws", get(websocket_handler))
+                .nest_service("/sprites", ServeDir::new(SPRITES_DIR))
+                .route("/", get(embedded_index))
+                .route("/remote", get(embedded_index))
+                .route("/remote/*path", get(embedded_remote))
+                .route("/*path", get(embedded_static))
+                .layer(CorsLayer::permissive())
+                .with_state(Arc::clone(&state));
+
+            let port = env::var("PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(3000);
+
+            let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+                .await
+                .expect("Failed to bind to port 3000");
+
+            let source = state.source.read().await.clone();
+            match &source {
+                TeamSource::TextFiles => {
+                    println!("Server running on http://0.0.0.0:{}", port);
+                    println!("Edit '{}' to update your Pokemon team", TEAM_FILE);
+                    println!("  - Additional files whose name contains 'team' are also picked up.");
+                    println!("  - Use '?team=<name>' in the URL to switch between teams.");
+                }
+                TeamSource::SaveFile(path) => {
+                    println!("Server running on http://0.0.0.0:{}", port);
+                    println!("Reading party from save file: {}", path);
+                }
+            }
+            println!("Place Pokemon sprites in the '{}' directory", SPRITES_DIR);
+
+            axum::serve(listener, app)
+                .await
+                .expect("Failed to start server");
+        });
     });
 
-    let p2p_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        if let Err(e) = p2p::start(p2p_state).await {
-            eprintln!("P2P error: {}", e);
-        }
-    });
+    // Run the iced window on the main thread; blocks until the window is closed.
+    let _ = ui_runner();
 
-    let app = Router::new()
-        .route("/ws", get(websocket_handler))
-        .nest_service("/sprites", ServeDir::new(SPRITES_DIR))
-        .route("/", get(embedded_index))
-        .route("/remote", get(embedded_index))
-        .route("/remote/*path", get(embedded_remote))
-        .route("/*path", get(embedded_static))
-        .layer(CorsLayer::permissive())
-        .with_state(Arc::clone(&state));
-
-    let port = env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3000);
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
-        .await
-        .expect("Failed to bind to port 3000");
-
-    let source = state.source.read().await.clone();
-    match &source {
-        TeamSource::TextFiles => {
-            println!("Server running on http://0.0.0.0:3000");
-            println!("Edit '{}' to update your Pokemon team", TEAM_FILE);
-            println!("  - Additional files whose name contains 'team' are also picked up.");
-            println!("  - Use '?team=<name>' in the URL to switch between teams.");
-        }
-        TeamSource::SaveFile(path) => {
-            println!("Server running on http://0.0.0.0:3000");
-            println!("Reading party from save file: {}", path);
-        }
-    }
-    println!("Place Pokemon sprites in the '{}' directory", SPRITES_DIR);
-
-    axum::serve(listener, app)
-        .await
-        .expect("Failed to start server");
+    // When the UI window is closed, exit the whole process.  The background
+    // thread (Tokio runtime) will be torn down automatically.
+    std::process::exit(0);
 }
 
 // ── Save-file selection ──────────────────────────────────────────────────────
@@ -161,17 +183,17 @@ async fn watch_current_source(state: Arc<AppState>) {
                 if let TeamSource::SaveFile(path) = source {
                     if !prompted_for_save_error {
                         prompted_for_save_error = true;
-                        if let Some(selected) =
-                            source_picker::prompt_for_valid_save_file(Some(std::path::Path::new(
-                                &path,
-                            )))
-                        {
+                        if let Some(selected) = source_picker::prompt_for_valid_save_file(Some(
+                            std::path::Path::new(&path),
+                        )) {
                             let mut source = state.source.write().await;
                             *source = TeamSource::SaveFile(selected.to_string_lossy().into_owned());
                             continue;
                         }
 
-                        eprintln!("No replacement save file selected. Switching to text-file mode.");
+                        eprintln!(
+                            "No replacement save file selected. Switching to text-file mode."
+                        );
                         let mut source = state.source.write().await;
                         *source = TeamSource::TextFiles;
                     }

@@ -12,3 +12,14 @@ pub struct TeamUrl {
     pub team_name: String,
     pub url: String,
 }
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    TicketInputChanged(String),
+    CopyTicket,
+    SubmitTicket,
+    ToggleSourceMode,
+    SelectSaveFile,
+    CopyUrl(String),
+    Tick,
+}

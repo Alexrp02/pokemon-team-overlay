@@ -1,11 +1,20 @@
 mod app;
 mod model;
 
-use eframe::egui;
+use iced::window;
+use iced::{Element, Size, Task};
 use tokio::sync::{mpsc, watch};
 
 pub use model::TeamUrl;
-use model::UiSnapshot;
+use model::{Message, UiSnapshot};
+
+fn update(app: &mut app::ConnectionUiApp, message: Message) -> Task<Message> {
+    app.update(message)
+}
+
+fn view(app: &app::ConnectionUiApp) -> Element<'_, Message> {
+    app.view()
+}
 
 pub enum UiAction {
     ConnectTicket(String),
@@ -50,55 +59,50 @@ impl UiBridge {
     }
 }
 
-pub fn spawn_connection_ui() -> (UiBridge, mpsc::Receiver<UiAction>) {
+/// Prepares the iced application and returns it ready to run, along with the
+/// bridge used to push state updates into it and the channel for receiving
+/// actions from it.
+///
+/// The caller is responsible for calling `.run()` on the returned application
+/// **on the main thread**, as required by every major windowing system.
+pub fn build_connection_ui() -> (
+    impl FnOnce() -> iced::Result,
+    UiBridge,
+    mpsc::Receiver<UiAction>,
+) {
     let (action_tx, action_rx) = mpsc::channel(16);
     let (snapshot_tx, snapshot_rx) = watch::channel(UiSnapshot::default());
-    let ui_bridge = UiBridge {
-        snapshot_tx: snapshot_tx.clone(),
+
+    let ui_bridge = UiBridge { snapshot_tx };
+    let ui_action_tx = action_tx;
+
+    // iced requires `Fn` for boot, but these values are only consumed once.
+    // Wrap in Mutex<Option<_>> so the closure satisfies the `Fn` bound.
+    let boot_state = std::sync::Mutex::new(Some((snapshot_rx, ui_action_tx)));
+
+    let runner = move || {
+        iced::application(
+            move || {
+                let (rx, tx) = boot_state
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("boot called more than once");
+                app::ConnectionUiApp::new(rx, tx)
+            },
+            update,
+            view,
+        )
+        .title("Pokemon Team Overlay - P2P")
+        .subscription(|app: &app::ConnectionUiApp| app.subscription())
+        .theme(|app: &app::ConnectionUiApp| app.theme())
+        .window(window::Settings {
+            size: Size::new(720.0, 640.0),
+            min_size: Some(Size::new(500.0, 400.0)),
+            ..Default::default()
+        })
+        .run()
     };
 
-    let ui_action_tx = action_tx.clone();
-    std::thread::spawn(move || {
-        let mut options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 640.0]),
-            ..Default::default()
-        };
-
-        #[cfg(target_os = "linux")]
-        {
-            options.event_loop_builder = Some(Box::new(|builder| {
-                use winit::platform::wayland::EventLoopBuilderExtWayland;
-                use winit::platform::x11::EventLoopBuilderExtX11;
-                EventLoopBuilderExtWayland::with_any_thread(builder, true);
-                EventLoopBuilderExtX11::with_any_thread(builder, true);
-            }));
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            options.event_loop_builder = Some(Box::new(|builder| {
-                use winit::platform::windows::EventLoopBuilderExtWindows;
-                EventLoopBuilderExtWindows::with_any_thread(builder, true);
-            }));
-        }
-
-        let result = eframe::run_native(
-            "Pokemon Team Overlay - P2P",
-            options,
-            Box::new(move |_cc| {
-                Ok(Box::new(app::ConnectionUiApp::new(
-                    snapshot_rx,
-                    ui_action_tx,
-                )))
-            }),
-        );
-
-        if let Err(err) = result {
-            eprintln!("P2P UI error: {}", err);
-            std::process::exit(1);
-        }
-        std::process::exit(0);
-    });
-
-    (ui_bridge, action_rx)
+    (Box::new(runner), ui_bridge, action_rx)
 }

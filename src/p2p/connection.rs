@@ -13,7 +13,7 @@ use crate::team::PokemonTeam;
 use super::error::P2pError;
 use super::protocol::{TeamsMessage, ALPN};
 use super::ticket::{create_ticket, parse_ticket};
-use super::ui::{spawn_connection_ui, TeamUrl, UiAction, UiBridge};
+use super::ui::{TeamUrl, UiAction, UiBridge};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -22,7 +22,11 @@ struct ActiveConnection {
     conn: Connection,
 }
 
-pub async fn run(state: Arc<AppState>) -> Result<(), P2pError> {
+pub async fn run(
+    state: Arc<AppState>,
+    ui: UiBridge,
+    ticket_rx: mpsc::Receiver<UiAction>,
+) -> Result<(), P2pError> {
     let endpoint = Endpoint::builder()
         .alpns(vec![ALPN.to_vec()])
         .bind()
@@ -39,7 +43,6 @@ pub async fn run(state: Arc<AppState>) -> Result<(), P2pError> {
         );
     }
 
-    let (ui, ticket_rx) = spawn_connection_ui();
     let ticket = create_ticket(endpoint.addr());
     ui.set_local_ticket(ticket.clone());
     ui.set_status("Waiting for peer ticket or inbound connection...".to_string());

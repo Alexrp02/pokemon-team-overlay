@@ -1,4 +1,7 @@
+# Pokemon Team Overlay
 A simple way to display your gen4 pokemon team in your streaming without having to worry about updating the overlay!
+
+<img width="867" height="724" alt="image" src="https://github.com/user-attachments/assets/f55f3f0c-a44f-4c3a-accc-4fb43bffe75b" />
 
 # How to use
 
@@ -20,7 +23,7 @@ When the application is first run, it will create a `sprites` folder.
 
 It is as simple as putting any sprite you want in the sprites folder. When displaying a pokemon, it will get the image that has the name of the species of the pokemon (for example, if you have a pikachu in your team, it will get the image with name *pikachu* in the sprites)
 
-There are some sources that have all the pokemon sprites with names, you can check in google and you will probably find one easily.
+There are some sources that have all the pokemon sprites with names, you can check in google and you will probably find one easily (https://www.dragonflycave.com/resources/sprites/ for example)
 
 ## Displaying the team in your streaming tool
 

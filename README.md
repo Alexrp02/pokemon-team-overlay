@@ -9,6 +9,8 @@ The application can be used for **one person** use or you can connect with **a f
 
 The only requirement is to download the application from the releases folder and the sprites you want in the sprites folder that gets generated with the execution of the application.
 
+If you wanted a mini video on how to use it, tell me and I'll be glad to make it :)
+
 ## Setting up your team
 
 For this we have two modes. We can read the team from a save file or from text files.
